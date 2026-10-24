@@ -12,11 +12,14 @@ Format des lignes de PolyScope :
 
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from collections.abc import Iterator
 
 from ...core.events import Level, LogLine
+
+log = logging.getLogger(__name__)
 
 FILES = {"/ursim/URControl.log": "controller", "/ursim/polyscope.log": "polyscope"}
 
@@ -28,6 +31,10 @@ _SOCKET_NOISE = re.compile(r'^Socket "|TCPServer: Accepted|TCPReceiver closed|ob
 
 
 def parse(line: str, source: str) -> LogLine | None:
+    """Traduit une ligne de journal ; None pour une ligne vide ou un en-tête de `tail`.
+
+    Une ligne sans niveau reconnaissable est gardée au niveau INFO.
+    """
     line = line.strip()
     if not line or line.startswith("==>"):
         return None
@@ -42,10 +49,16 @@ def parse(line: str, source: str) -> LogLine | None:
 
 
 def stream(container: str) -> Iterator[LogLine]:
-    """Nouvelles lignes des deux journaux, à partir de maintenant."""
+    """Nouvelles lignes des deux journaux, à partir de maintenant.
+
+    `tail -q` ne dit pas de quel fichier vient chaque ligne : on le déduit du format de la date.
+
+    Raises:
+        ConnectionError: quand `tail` s'arrête (conteneur arrêté ou redémarré).
+    """
     cmd = ["docker", "exec", container, "tail", "-n", "0", "-q", "-F", *FILES]
-    # `tail -q` ne dit pas de quel fichier vient chaque ligne : on le déduit du format.
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1) as proc:
+        log.info("lecture du journal du conteneur %s", container)
         assert proc.stdout is not None
         for raw in proc.stdout:
             source = "polyscope" if re.match(r"\d{4}-\d{2}-\d{2} \d", raw) else "controller"

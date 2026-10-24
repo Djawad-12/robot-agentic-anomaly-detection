@@ -15,12 +15,15 @@ from .events import FaultCode, LogLine, Sample, ToolSpec
 
 
 class Connector(ABC):
-    """Accès aux quatre sources de données d'une machine, et aux actions possibles sur elle."""
+    """Accès aux quatre sources de données d'une machine, et aux actions possibles sur elle.
+
+    Les trois flux (`signals`, `logs`, `faults`) sont des itérateurs bloquants, lus chacun
+    dans son propre fil par `core.recorder.Recorder`. Un flux qui perd sa source lève une
+    exception (ConnectionError en général) : le `Recorder` le relance.
+    """
 
     #: Nom court de la machine, repris dans les rapports et les fichiers de référence.
     name: str = "machine"
-
-    # --- Les quatre flux ---------------------------------------------------------------
 
     @abstractmethod
     def signals(self) -> Iterator[Sample]:
@@ -38,8 +41,6 @@ class Connector(ABC):
     def docs(self) -> list[str]:
         """Chemins des documents de la machine (manuels PDF, pages HTML enregistrées)."""
 
-    # --- Actions -----------------------------------------------------------------------
-
     @abstractmethod
     def tools(self) -> list[ToolSpec]:
         """Actions propres à cette machine, proposées à l'agent."""
@@ -52,8 +53,6 @@ class Connector(ABC):
     def stop(self) -> None:
         """Arrête immédiatement tout mouvement en cours."""
 
-    # --- État --------------------------------------------------------------------------
-
     @abstractmethod
     def health(self) -> dict[str, Any]:
         """Vérifie que la machine répond. Renvoie {"ok": bool, ...détails}."""
@@ -61,6 +60,3 @@ class Connector(ABC):
     def snapshot(self) -> dict[str, Any]:
         """État courant résumé (mode, sécurité, programme…). Facultatif."""
         return {}
-
-    def close(self) -> None:
-        """Libère les connexions. Facultatif."""

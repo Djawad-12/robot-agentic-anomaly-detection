@@ -8,6 +8,7 @@ les essais de prompts l'utilisent : rapides, gratuits et reproductibles.
 
 from __future__ import annotations
 
+import logging
 import math
 import queue
 import time
@@ -17,23 +18,45 @@ from typing import Any
 from ...core.events import FaultCode, Level, LogLine, Sample, ToolSpec
 from ...core.interfaces import Connector
 
+log = logging.getLogger(__name__)
+
 RATE_HZ = 100
 
 
 class FakeConnector(Connector):
+    """Bras à six articulations simulé ; ses mouvements sont calculés dans le fil appelant.
+
+    Attributes:
+        q: positions articulaires (rad).
+        qd: vitesses articulaires (rad/s).
+        friction: facteur d'effort par articulation (1.0 = sain).
+        calls: actions reçues, pour vérifier dans les tests ce qui a été exécuté.
+    """
+
     name = "fake_arm"
 
     def __init__(self) -> None:
-        self.q = [0.0, -1.57, 1.57, -1.57, -1.57, 0.0]
-        self.qd = [0.0] * 6
-        self.friction = [1.0] * 6
+        """Place le bras dans une position de repos, sans panne."""
+        self.q: list[float] = [0.0, -1.57, 1.57, -1.57, -1.57, 0.0]
+        self.qd: list[float] = [0.0] * 6
+        self.friction: list[float] = [1.0] * 6
         self.log_q: queue.Queue[LogLine] = queue.Queue()
         self.fault_q: queue.Queue[FaultCode] = queue.Queue()
-        self.calls: list[tuple[str, dict]] = []
-
-    # --- Pannes simulées ------------------------------------------------------------------
+        self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def inject(self, kind: str, joint: int = 2, factor: float = 1.4) -> None:
+        """Simule une panne.
+
+        Args:
+            kind: "friction" (effort multiplié par `factor` sur `joint`, avec un avertissement
+                dans le journal) ou "fault" (code d'erreur C204A3 sur `joint`).
+            joint: articulation concernée.
+            factor: facteur d'effort pour "friction".
+
+        Raises:
+            ValueError: si `kind` est inconnu.
+        """
+        log.info("panne simulée : %s sur l'articulation %d", kind, joint)
         if kind == "friction":
             self.friction[joint] = factor
             self.log_q.put(LogLine(level=Level.WARNING, source="controller", text=f"Joint {joint}: high following error"))
@@ -42,9 +65,8 @@ class FakeConnector(Connector):
         else:
             raise ValueError(kind)
 
-    # --- Flux ---------------------------------------------------------------------------
-
     def signals(self) -> Iterator[Sample]:
+        """Échantillons à 100 Hz : l'effort dépend de la gravité, de la vitesse et du frottement."""
         while True:
             values: dict[str, float] = {}
             for j in range(6):
@@ -57,19 +79,21 @@ class FakeConnector(Connector):
             time.sleep(1 / RATE_HZ)
 
     def logs(self) -> Iterator[LogLine]:
+        """Lignes de journal produites par `inject`."""
         while True:
             yield self.log_q.get()
 
     def faults(self) -> Iterator[FaultCode]:
+        """Codes d'erreur produits par `inject`."""
         while True:
             yield self.fault_q.get()
 
     def docs(self) -> list[str]:
+        """Aucune documentation."""
         return []
 
-    # --- Actions ------------------------------------------------------------------------
-
     def tools(self) -> list[ToolSpec]:
+        """Un seul test : l'aller-retour d'une articulation, borné à ±5°."""
         return [
             ToolSpec(
                 name="joint_test",
@@ -86,6 +110,11 @@ class FakeConnector(Connector):
         ]
 
     def call_tool(self, name: str, args: dict[str, Any]) -> str:
+        """Fait l'aller-retour de l'articulation à 0,3 rad/s, en temps réel.
+
+        Raises:
+            ValueError: si l'outil n'existe pas.
+        """
         self.calls.append((name, args))
         if name != "joint_test":
             raise ValueError(f"outil inconnu : {name}")
@@ -102,10 +131,13 @@ class FakeConnector(Connector):
         return f"articulation {j} {args['delta_deg']:+}° : terminé"
 
     def stop(self) -> None:
+        """Annule toute vitesse."""
         self.qd = [0.0] * 6
 
     def health(self) -> dict[str, Any]:
+        """Toujours en bonne santé."""
         return {"ok": True, "machine": "simulée"}
 
     def snapshot(self) -> dict[str, Any]:
+        """État fixe : en marche, sécurité normale."""
         return {"mode": "RUNNING", "sécurité": "NORMAL"}

@@ -6,11 +6,11 @@ complémentaires, plutôt qu'un simple résumé :
    lecture ;
 2. un graphique de chaque voie qui s'écarte, superposé à la référence : les études sur les
    LLM et les séries temporelles montrent qu'ils repèrent mieux une anomalie sur une image
-   que dans une suite de nombres ;
+   que dans une suite de nombres (Zhou & Yu, ICLR 2025, arXiv 2410.05440) ;
 3. les valeurs elles-mêmes, en tableau CSV, au rythme le plus fin que permet le budget
    (`RECORDING_TOKEN_BUDGET`). Un test de 5 s à 500 Hz sur 63 voies fait environ 160 000
    nombres : le tableau est donc moyenné par fenêtres jusqu'à tenir dans le budget, sans
-   perdre les voies ni le début et la fin du test. L'agent peut redemander une voie précise
+   perdre de voie ni le début et la fin du test. L'agent peut redemander une voie précise
    à pleine résolution avec l'outil `get_recording`.
 """
 
@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
+from typing import Any
 
 import matplotlib
 
@@ -27,41 +29,52 @@ import numpy as np  # noqa: E402
 
 from ..core.recorder import Recording  # noqa: E402
 
-# Ordre de grandeur pour des nombres courts séparés par des virgules.
+log = logging.getLogger(__name__)
+
+# Caractères par token, mesuré en ordre de grandeur sur des nombres courts séparés par des virgules.
 CHARS_PER_TOKEN = 2.6
 
 
 def estimate_tokens(text: str) -> int:
+    """Estimation du nombre de tokens d'un texte, sans appel à l'API (prudente pour des nombres)."""
     return int(len(text) / CHARS_PER_TOKEN) + 1
 
 
 def to_csv(rec: Recording, channels: list[str] | None, hz: float) -> str:
+    """Tableau CSV des voies demandées, rééchantillonnées à `hz` (4 chiffres significatifs).
+
+    La première colonne est le temps relatif au début de l'enregistrement, en secondes. Une
+    valeur manquante (NaN) laisse la case vide.
+    """
     t, data = rec.resample(hz, channels)
     names = list(data)
     lines = ["t_s," + ",".join(names)]
     for i in range(len(t)):
-        lines.append(f"{t[i]:.3f}," + ",".join(_num(data[n][i]) for n in names))
+        lines.append(f"{t[i]:.3f}," + ",".join(f"{data[n][i]:.4g}" if np.isfinite(data[n][i]) else "" for n in names))
     return "\n".join(lines)
 
 
-def _num(x: float) -> str:
-    if not np.isfinite(x):
-        return ""
-    return f"{x:.4g}"
-
-
 def csv_within_budget(rec: Recording, channels: list[str] | None, budget_tokens: int) -> tuple[str, float]:
-    """Tableau au rythme le plus élevé qui tient dans le budget. Renvoie (csv, rythme en Hz)."""
+    """Tableau CSV au rythme le plus élevé qui tient dans `budget_tokens`.
+
+    Le rythme part de celui de l'enregistrement et est divisé par deux jusqu'à tenir dans le
+    budget (2 Hz au minimum, même si le budget est alors dépassé).
+
+    Returns:
+        Le tableau et le rythme retenu, en Hz.
+    """
     hz = max(rec.rate_hz, 1.0)
     while True:
         text = to_csv(rec, channels, hz)
-        if estimate_tokens(text) <= budget_tokens or hz <= 2:
+        tokens = estimate_tokens(text)
+        if tokens <= budget_tokens or hz <= 2:
+            log.debug("tableau de %s : %.0f Hz, ≈ %d tokens (budget %d)", rec.id, min(hz, rec.rate_hz), tokens, budget_tokens)
             return text, min(hz, rec.rate_hz)
         hz /= 2
 
 
 def informative_channels(rec: Recording) -> list[str]:
-    """Voies qui varient pendant le test : une voie constante n'apporte rien au tableau."""
+    """Voies qui varient pendant l'enregistrement : une voie constante n'apporte rien au tableau."""
     out = []
     for name, x in rec.channels.items():
         x = x[np.isfinite(x)]
@@ -71,7 +84,11 @@ def informative_channels(rec: Recording) -> list[str]:
 
 
 def plot(rec: Recording, channels: list[str], reference: Recording | None = None) -> str:
-    """Graphique PNG (base64) des voies demandées, avec la référence en pointillés."""
+    """Graphique des voies demandées (8 au plus), une par ligne, avec la référence en pointillés.
+
+    Returns:
+        L'image PNG encodée en base64, prête pour un bloc image de l'API.
+    """
     channels = channels[:8]
     fig, axes = plt.subplots(len(channels), 1, figsize=(9, 1.7 * len(channels) + 0.6), sharex=True, squeeze=False)
     for ax, name in zip(axes[:, 0], channels, strict=True):
@@ -91,5 +108,6 @@ def plot(rec: Recording, channels: list[str], reference: Recording | None = None
     return base64.standard_b64encode(buf.getvalue()).decode()
 
 
-def image_block(png_b64: str) -> dict:
+def image_block(png_b64: str) -> dict[str, Any]:
+    """Bloc image de l'API Claude à partir d'un PNG en base64."""
     return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png_b64}}

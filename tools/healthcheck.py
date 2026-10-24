@@ -12,7 +12,7 @@ import time
 
 import anthropic
 
-from robot_agentic.config import load_settings
+from robot_agentic.config import load_settings, setup_logging
 from robot_agentic.connectors import load
 from robot_agentic.core.recorder import Recorder
 
@@ -20,10 +20,16 @@ OK, KO = "\033[32m✔\033[0m", "\033[31m✘\033[0m"
 
 
 def main() -> int:
+    """Lance les vérifications et affiche une ligne ✔ ou ✘ par point.
+
+    Returns:
+        0 si tout est prêt, 1 sinon.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--api", action="store_true", help="vérifie aussi l'accès à l'API Claude")
     args = parser.parse_args()
     settings = load_settings()
+    setup_logging(settings)
     connector = load(settings)
     results: list[tuple[bool, str]] = []
 

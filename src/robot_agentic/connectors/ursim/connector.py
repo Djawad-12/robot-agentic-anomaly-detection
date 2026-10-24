@@ -13,6 +13,7 @@ déclarées dans `limits` et appliquées par `core.safety` avant tout envoi.
 
 from __future__ import annotations
 
+import logging
 import math
 import subprocess
 import time
@@ -25,45 +26,61 @@ from ...core.interfaces import Connector
 from . import logs, primary, realtime, urscript
 from .dashboard import Dashboard
 
+log = logging.getLogger(__name__)
+
 # 10 % de la vitesse articulaire maximale d'un UR3e (π rad/s pour les poignets, on prend la plus faible).
-JOINT_SPEED = 0.1 * math.pi
-JOINT_ACC = 0.5
+JOINT_SPEED = 0.1 * math.pi  # rad/s
+JOINT_ACC = 0.5  # rad/s²
 TOOL_SPEED = 0.025  # m/s
-TOOL_ACC = 0.25
+TOOL_ACC = 0.25  # m/s²
 
 JOINT_NAMES = ["base", "épaule", "coude", "poignet 1", "poignet 2", "poignet 3"]
 
+DOC_SUFFIXES = {".pdf", ".html", ".htm", ".txt", ".md"}
+
 
 class URSimConnector(Connector):
+    """Robot UR3e simulé par URSim, lancé dans un conteneur Docker.
+
+    Args:
+        host: adresse du contrôleur (ports publiés par Docker).
+        container: nom du conteneur, pour lire le journal.
+        manuals_dir: dossier des manuels de la machine.
+    """
+
     name = "ursim_ur3"
 
-    def __init__(self, host: str = "127.0.0.1", container: str = "ursim", manuals_dir: Path = Path("manuals/ursim")):
+    def __init__(self, host: str = "127.0.0.1", container: str = "ursim", manuals_dir: Path = Path("manuals/ursim")) -> None:
+        """Mémorise les adresses ; les connexions s'ouvrent à la première lecture des flux."""
         self.host = host
         self.container = container
         self.manuals_dir = manuals_dir
         self.dashboard = Dashboard(host)
 
-    # --- Flux ---------------------------------------------------------------------------
-
     def signals(self) -> Iterator[Sample]:
+        """Signaux temps réel à 500 Hz : voir `realtime.FIELDS` pour la liste des voies."""
         return realtime.stream(self.host)
 
     def logs(self) -> Iterator[LogLine]:
+        """Nouvelles lignes du journal du contrôleur et de PolyScope."""
         return logs.stream(self.container)
 
     def faults(self) -> Iterator[FaultCode]:
-        # L'interface primaire mélange codes d'erreur et messages texte ; seuls les codes sont
-        # gardés ici, les mêmes événements apparaissant aussi dans le journal du contrôleur.
+        """Codes d'erreur de l'interface primaire.
+
+        Les messages texte de cette interface sont écartés : les mêmes événements figurent
+        déjà dans le journal du contrôleur.
+        """
         return (m for m in primary.stream(self.host) if isinstance(m, FaultCode))
 
     def docs(self) -> list[str]:
+        """Manuels présents dans `manuals_dir` (PDF, HTML, texte)."""
         if not self.manuals_dir.exists():
             return []
-        return sorted(str(p) for p in self.manuals_dir.iterdir() if p.suffix.lower() in {".pdf", ".html", ".htm", ".txt", ".md"})
-
-    # --- Actions ------------------------------------------------------------------------
+        return sorted(str(p) for p in self.manuals_dir.iterdir() if p.suffix.lower() in DOC_SUFFIXES)
 
     def tools(self) -> list[ToolSpec]:
+        """Tests proposés à l'agent, tous lents (10 % de la vitesse) et de faible amplitude."""
         joint = {"type": "integer", "minimum": 0, "maximum": 5, "description": "0 base, 1 épaule, 2 coude, 3-5 poignets"}
         return [
             ToolSpec(
@@ -141,10 +158,25 @@ class URSimConnector(Connector):
         ]
 
     def call_tool(self, name: str, args: dict[str, Any]) -> str:
+        """Exécute un test (déjà validé par `core.safety`) et attend la fin du mouvement.
+
+        Le mouvement est écrit en URScript et exécuté par le contrôleur ; chaque test ramène
+        le robot à sa position de départ. La fin est détectée sur le Dashboard (`running`).
+
+        Returns:
+            Un compte rendu court : test, terminé ou non, mode et état de sécurité à la fin.
+
+        Raises:
+            ValueError: si l'outil n'existe pas.
+            OSError: si le contrôleur est injoignable.
+        """
         if name == "recover_robot":
             return f"mode du robot : {self.dashboard.power_on_and_release()}"
-        if (mode := self.dashboard.robot_mode()) != "RUNNING":
+        mode = self.dashboard.robot_mode()
+        if mode != "RUNNING":
+            log.warning("%s impossible : robot en mode %s", name, mode)
             return f"action impossible : le robot est en mode {mode} (utiliser recover_robot si la cause est identifiée)"
+
         if name == "joint_test":
             j, d = int(args["joint"]), math.radians(float(args["delta_deg"]))
             script = f"""
@@ -164,6 +196,8 @@ movel(p0, a={TOOL_ACC}, v={TOOL_SPEED})
 """
             label = f"main dx={dx} dy={dy} dz={dz} m"
         elif name == "add_load":
+            # La charge d'origine est relue puis rétablie, pour ne pas effacer une mauvaise
+            # déclaration de charge qui serait justement la panne recherchée.
             kg, d = float(args["kg"]), math.radians(3)
             script = f"""
 m0 = get_target_payload()
@@ -188,28 +222,40 @@ set_target_payload(m0, cog0)
             label = f"test global ±{args['amplitude_deg']}°"
         else:
             raise ValueError(f"outil inconnu : {name}")
-        urscript.send(self.host, script)
-        finished = self._wait_program(timeout=60.0)
-        return f"{label} : {'terminé' if finished else 'NON terminé (délai dépassé ou arrêt)'} ; mode {self.dashboard.robot_mode()}, sécurité {self.dashboard.safety_status()}"
 
-    def _wait_program(self, timeout: float) -> bool:
+        log.info("URSim : %s", label)
+        urscript.send(self.host, script)
+        # Le contrôleur met quelques centaines de millisecondes à démarrer le programme : sans
+        # cette attente, `running` répondrait encore « false » et le test serait jugé fini.
         time.sleep(0.3)
-        end = time.time() + timeout
-        while time.time() < end:
+        finished = False
+        deadline = time.time() + 60.0
+        while time.time() < deadline:
             if self.dashboard.send("running").endswith("false"):
-                return True
+                finished = True
+                break
             time.sleep(0.1)
-        return False
+        mode, safety = self.dashboard.robot_mode(), self.dashboard.safety_status()
+        if not finished:
+            log.warning("URSim : %s non terminé après 60 s (mode %s, sécurité %s)", label, mode, safety)
+        return f"{label} : {'terminé' if finished else 'NON terminé (délai dépassé ou arrêt)'} ; mode {mode}, sécurité {safety}"
 
     def stop(self) -> None:
+        """Arrête le mouvement en cours (décélération de 2 rad/s²)."""
+        log.warning("arrêt du mouvement demandé")
         urscript.send(self.host, "stopj(2.0)")
 
-    # --- État ---------------------------------------------------------------------------
-
     def snapshot(self) -> dict[str, Any]:
+        """État courant du robot, lu sur le Dashboard."""
         return self.dashboard.snapshot()
 
     def health(self) -> dict[str, Any]:
+        """Vérifie le Dashboard, le flux de signaux, l'accès au journal et la documentation.
+
+        Returns:
+            Une entrée lisible par vérification, et "ok" : True si le robot est en marche,
+            les signaux arrivent et le journal est accessible.
+        """
         out: dict[str, Any] = {}
         try:
             out["dashboard"] = self.dashboard.robot_mode()
@@ -221,10 +267,13 @@ set_target_payload(m0, cog0)
         except OSError as exc:
             out["signaux"] = f"injoignable ({exc})"
         try:
-            primary_ok = subprocess.run(["docker", "exec", self.container, "test", "-f", "/ursim/URControl.log"], capture_output=True, timeout=10).returncode == 0
-            out["journal"] = "accessible" if primary_ok else "fichier introuvable"
+            found = subprocess.run(
+                ["docker", "exec", self.container, "test", "-f", "/ursim/URControl.log"], capture_output=True, timeout=10
+            )
+            out["journal"] = "accessible" if found.returncode == 0 else "fichier introuvable"
         except (OSError, subprocess.TimeoutExpired) as exc:
             out["journal"] = f"inaccessible ({exc})"
         out["documentation"] = f"{len(self.docs())} document(s) dans {self.manuals_dir}"
         out["ok"] = out["dashboard"] == "RUNNING" and "voies" in out["signaux"] and out["journal"] == "accessible"
+        log.info("état de santé : %s", out)
         return out

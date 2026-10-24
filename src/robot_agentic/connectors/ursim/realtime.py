@@ -4,80 +4,79 @@ Le contrôleur envoie un paquet binaire toutes les 2 ms (500 Hz) sur les robots 
 Chaque paquet contient l'état complet du robot à cet instant ; on n'en garde que les voies
 utiles au diagnostic. Format : documentation Universal Robots « Remote Control Via TCP/IP »,
 section Real-Time interface (5.x). Aucune dépendance externe : `struct` suffit.
+
+Ce module est le seul à connaître ce format : le reste du code ne voit que des `Sample`.
 """
 
 from __future__ import annotations
 
+import logging
 import socket
 import struct
+import time
 from collections.abc import Iterator
 
 from ...core.events import Sample
 
+log = logging.getLogger(__name__)
+
 PORT = 30003
 
-# Décalage (en octets, taille du paquet comprise) et nombre de doubles de chaque champ retenu.
-FIELDS: dict[str, tuple[int, int]] = {
-    "q_target": (12, 6),
-    "torque_target": (204, 6),
-    "q_actual": (252, 6),
-    "qd_actual": (300, 6),
-    "current_actual": (348, 6),
-    "tcp_pose": (444, 6),
-    "tcp_force": (540, 6),
-    "motor_temperature": (692, 6),
-    "robot_mode": (756, 1),
-    "safety_mode": (812, 1),
-    "tool_accelerometer": (868, 3),
-    "speed_scaling": (940, 1),
-    "main_voltage": (972, 1),
-    "robot_voltage": (980, 1),
-    "robot_current": (988, 1),
-    "joint_voltage": (996, 6),
+# Champ retenu → (décalage en octets depuis le début du paquet, taille comprise ; nombre de
+# doubles ; noms des voies). Unités UR : rad, rad/s, A, Nm, m, N, °C, V.
+_JOINTS = range(6)
+_TCP = ["x", "y", "z", "rx", "ry", "rz"]
+FIELDS: dict[str, tuple[int, int, list[str]]] = {
+    "q_target": (12, 6, [f"joint_{i}_q_target" for i in _JOINTS]),
+    "torque_target": (204, 6, [f"joint_{i}_torque_target" for i in _JOINTS]),
+    "q_actual": (252, 6, [f"joint_{i}_q_actual" for i in _JOINTS]),
+    "qd_actual": (300, 6, [f"joint_{i}_qd_actual" for i in _JOINTS]),
+    "current_actual": (348, 6, [f"joint_{i}_current_actual" for i in _JOINTS]),
+    "tcp_pose": (444, 6, [f"tcp_pose_{a}" for a in _TCP]),
+    "tcp_force": (540, 6, [f"tcp_force_{a}" for a in _TCP]),
+    "motor_temperature": (692, 6, [f"joint_{i}_motor_temperature" for i in _JOINTS]),
+    "robot_mode": (756, 1, ["robot_mode"]),
+    "safety_mode": (812, 1, ["safety_mode"]),
+    "tool_accelerometer": (868, 3, ["tool_acc_x", "tool_acc_y", "tool_acc_z"]),
+    "speed_scaling": (940, 1, ["speed_scaling"]),
+    "main_voltage": (972, 1, ["main_voltage"]),
+    "robot_voltage": (980, 1, ["robot_voltage"]),
+    "robot_current": (988, 1, ["robot_current"]),
+    "joint_voltage": (996, 6, [f"joint_{i}_voltage" for i in _JOINTS]),
 }
-
-TCP_AXES = ["x", "y", "z", "rx", "ry", "rz"]
-
-
-def channel_names(field: str, n: int) -> list[str]:
-    """Noms lisibles des voies : joint_0_current, tcp_x, tool_acc_z, robot_mode…"""
-    if n == 1:
-        return [field]
-    if field.startswith("tcp_"):
-        return [f"{field}_{a}" for a in TCP_AXES]
-    if field == "tool_accelerometer":
-        return [f"tool_acc_{a}" for a in "xyz"]
-    return [f"joint_{i}_{field}" for i in range(n)]
 
 
 def parse(packet: bytes, t: float) -> Sample:
-    """Transforme un paquet complet (taille comprise) en `Sample`."""
+    """Transforme un paquet complet (les 4 octets de taille compris) en `Sample`.
+
+    Un champ qui dépasse la fin du paquet (version de contrôleur plus ancienne) est ignoré.
+    """
     values: dict[str, float] = {}
-    for field, (offset, n) in FIELDS.items():
+    for offset, n, names in FIELDS.values():
         if offset + 8 * n > len(packet):
             continue
-        for name, v in zip(channel_names(field, n), struct.unpack_from(f">{n}d", packet, offset), strict=True):
-            values[name] = v
+        values.update(zip(names, struct.unpack_from(f">{n}d", packet, offset), strict=True))
     return Sample(t=t, values=values)
 
 
 def stream(host: str, port: int = PORT, timeout: float = 2.0) -> Iterator[Sample]:
-    """Flux de `Sample` à 500 Hz. S'arrête (exception) si la connexion est perdue."""
-    import time
+    """Flux de `Sample` à 500 Hz, horodatés à la réception.
 
+    Raises:
+        ConnectionError: si le contrôleur ferme la connexion.
+        OSError: si le contrôleur est injoignable ou ne répond plus pendant `timeout` secondes.
+    """
     with socket.create_connection((host, port), timeout=timeout) as sock:
+        log.info("interface temps réel connectée (%s:%d)", host, port)
         buf = b""
         while True:
-            while len(buf) < 4:
+            # Un paquet peut arriver en plusieurs morceaux, ou plusieurs paquets d'un coup :
+            # on lit la taille (4 premiers octets), puis jusqu'à avoir le paquet entier.
+            while len(buf) < 4 or len(buf) < struct.unpack_from(">i", buf)[0]:
                 chunk = sock.recv(4096)
                 if not chunk:
                     raise ConnectionError("le contrôleur a fermé l'interface temps réel")
                 buf += chunk
             size = struct.unpack_from(">i", buf)[0]
-            while len(buf) < size:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    raise ConnectionError("le contrôleur a fermé l'interface temps réel")
-                buf += chunk
             packet, buf = buf[:size], buf[size:]
             yield parse(packet, time.time())

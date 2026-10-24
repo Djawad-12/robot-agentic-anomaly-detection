@@ -10,55 +10,72 @@ Commandes :
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from .agent.llm import ClaudeClient
 from .agent.modes import run_check, run_loop
 from .agent.tools import Toolbox
-from .config import Settings, load_settings
+from .config import Settings, load_settings, setup_logging
 from .connectors import load
 from .core.recorder import Recorder
 from .core.safety import SafetyPolicy
 from .hmi.cli import CLI
 
+log = logging.getLogger(__name__)
+
 
 @dataclass
 class Runtime:
+    """Tout ce qu'il faut pour travailler sur une machine : réglages, outils et interface.
+
+    Le connecteur, l'enregistreur et les garde-fous sont déjà branchés dans `toolbox`.
+    """
+
     settings: Settings
     toolbox: Toolbox
     hmi: CLI
 
 
 def build_runtime(auto_approve: bool = False, settings: Settings | None = None) -> Runtime:
+    """Assemble connecteur, enregistreur, garde-fous et outils, et démarre la lecture des flux.
+
+    Utilisé par la ligne de commande et par les benchmarks.
+
+    Args:
+        auto_approve: accepte automatiquement les tests (simulateur uniquement).
+        settings: réglages ; lus dans l'environnement si None.
+    """
     settings = settings or load_settings()
+    setup_logging(settings)
     hmi = CLI(auto_approve=auto_approve)
     connector = load(settings)
     recorder = Recorder(connector, settings.recordings_dir).start()
     safety = SafetyPolicy(ask_operator=hmi.confirm, pin=settings.operator_pin, ask_pin=hmi.ask_pin)
-    toolbox = Toolbox(connector, recorder, safety, settings.baselines_dir, settings.data_dir / "docs_index", settings.recording_token_budget)
+    toolbox = Toolbox(
+        connector, recorder, safety, settings.baselines_dir, settings.data_dir / "docs_index", settings.recording_token_budget
+    )
+    log.info("machine %s, modèle %s, accord automatique : %s", connector.name, settings.model, auto_approve)
     time.sleep(1.5)  # laisse les flux se remplir avant la première lecture
     return Runtime(settings, toolbox, hmi)
 
 
-def standard_tests(toolbox: Toolbox) -> list[tuple[str, dict]]:
-    """Tests de référence : un aller-retour de 5° par articulation, puis le test global."""
-    tests: list[tuple[str, dict]] = []
-    if "joint_test" in toolbox.machine_tools:
-        tests += [("joint_test", {"joint": j, "delta_deg": 5}) for j in range(6)]
-    if "overall_test" in toolbox.machine_tools:
-        tests.append(("overall_test", {"amplitude_deg": 5}))
-    return tests
-
-
 def main(argv: list[str] | None = None) -> int:
+    """Lit la ligne de commande et exécute la commande demandée.
+
+    Returns:
+        Le code de sortie : 0 en cas de succès, 1 si la machine n'est pas prête ou si
+        l'opérateur annule.
+    """
     parser = argparse.ArgumentParser(prog="robot-agentic", description="Agent de diagnostic Robot Agentic")
     parser.add_argument("--yes", action="store_true", help="accepte automatiquement les tests (simulation uniquement)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("health", help="vérifie la machine et les flux")
     b = sub.add_parser("baseline", help="enregistre des références de bon fonctionnement")
-    b.add_argument("--standard", action="store_true", help="tous les tests de référence")
+    b.add_argument("--standard", action="store_true", help="un aller-retour de 5° par articulation, puis le test global")
     b.add_argument("--test", nargs="+", metavar="NOM [clé=valeur…]", help="un test précis, ex. joint_test joint=1 delta_deg=5")
     c = sub.add_parser("check", help="contrôle ponctuel")
     c.add_argument("request", nargs="*", help="demande précise (facultatif)")
@@ -75,8 +92,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if health.get("ok") else 1
 
     if args.command == "baseline":
+        tests: list[tuple[str, dict[str, Any]]] = []
         if args.standard:
-            tests = standard_tests(tb)
+            if "joint_test" in tb.machine_tools:
+                tests += [("joint_test", {"joint": j, "delta_deg": 5}) for j in range(6)]
+            if "overall_test" in tb.machine_tools:
+                tests.append(("overall_test", {"amplitude_deg": 5}))
         elif args.test:
             name, *pairs = args.test
             tests = [(name, {k: float(v) if "." in v else int(v) for k, v in (p.split("=", 1) for p in pairs)})]
@@ -96,10 +117,12 @@ def main(argv: list[str] | None = None) -> int:
         else:
             run_loop(tb, llm, hmi, st.reports_dir)
     except KeyboardInterrupt:
+        log.warning("interruption par l'opérateur")
         tb.connector.stop()
         hmi.say("Arrêt demandé.")
     u = llm.usage
-    hmi.say(f"Appels à Claude : {u.calls}, {u.input_tokens + u.cache_read_tokens} tokens en entrée, {u.output_tokens} en sortie, ≈ {u.cost_usd:.3f} $")
+    tokens_in = u.input_tokens + u.cache_read_tokens
+    hmi.say(f"Appels à Claude : {u.calls}, {tokens_in} tokens en entrée, {u.output_tokens} en sortie, ≈ {u.cost_usd:.3f} $")
     return 0
 
 

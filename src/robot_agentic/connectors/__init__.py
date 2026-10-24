@@ -7,6 +7,12 @@ from ..core.interfaces import Connector
 
 
 def load(settings: Settings) -> Connector:
+    """Crée le connecteur désigné par `settings.connector`.
+
+    Raises:
+        NotImplementedError: pour les connecteurs de la phase 2 (roarm, motorscope).
+        ValueError: pour un nom inconnu.
+    """
     if settings.connector == "ursim":
         from .ursim import URSimConnector
 
