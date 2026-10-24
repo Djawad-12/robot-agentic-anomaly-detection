@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robot-agentic"
+version = "0.1.0"
+description = "Agent de diagnostic : remonte à la cause racine d'une panne à partir des signaux, journaux, codes d'erreur et documentation d'une machine."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "anthropic>=2.0",
+  "langgraph>=0.6",
+  "numpy>=2.1",
+  "matplotlib>=3.9",
+  "pydantic>=2.8",
+  "pypdf>=5.0",
+  "python-dotenv>=1.0",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+robot-agentic = "robot_agentic.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+robot_agentic = ["agent/prompts/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
