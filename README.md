@@ -61,8 +61,9 @@ docker run -d --name ursim -e ROBOT_MODEL=UR3 \
 # later: docker start ursim
 ```
 
-Documentation: put the manuals (PDF) in `manuals/ursim/`, e.g. the Universal Robots *Service
-Manual* and the error code list. They are not versioned.
+Documentation: `.venv/bin/python -m tools.fetch_ur_docs` downloads the official Universal Robots error
+code pages (software 5.26, with their web address) into `manuals/ursim/`. PDF manuals (e.g. the
+*Service Manual*) can be added to the same folder. The folder is not versioned.
 
 ## Usage
 

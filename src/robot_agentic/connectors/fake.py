@@ -61,7 +61,7 @@ class FakeConnector(Connector):
             self.friction[joint] = factor
             self.log_q.put(LogLine(level=Level.WARNING, source="controller", text=f"Joint {joint}: high following error"))
         elif kind == "fault":
-            self.fault_q.put(FaultCode(code="C204A3", message=f"[JOINT{joint}] Protective stop: joint position deviates from target"))
+            self.fault_q.put(FaultCode(code="C204A3", message=f"[JOINT{joint}] Sudden stop"))
         else:
             raise ValueError(kind)
 

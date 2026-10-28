@@ -8,7 +8,7 @@ from pathlib import Path
 
 from robot_agentic.connectors import ursim
 from robot_agentic.core.events import Level
-from robot_agentic.docs import DocSearch, Passage
+from robot_agentic.docs import DocSearch, Passage, build
 
 
 def test_realtime_packet() -> None:
@@ -99,3 +99,13 @@ def test_flight_report(tmp_path: Path) -> None:
     assert set(rec.channels) == {"joint_2_current_actual", "safety_mode"}
     assert rec.t[-1] == rec.t1 and abs(rec.t[-1] - rec.t[0] - 0.002) < 1e-6
     assert [x.text for x in rec.logs] == ["C209A0"] and "CONTROLLER_REPORTED_ERROR" in rec.label
+
+
+def test_markdown_sections_keep_their_source(tmp_path: Path) -> None:
+    """Each Markdown section is its own passage, and a long section repeats its heading and source in every passage."""
+    doc = tmp_path / "codes.md"
+    long_body = "\n\n".join(f"C158A{i} " + "word " * 100 for i in range(8))
+    doc.write_text(f"## C157 Short\n\nSource: https://x/157\n\nC157A0 text\n\n## C158 Long\n\nSource: https://x/158\n\n{long_body}\n")
+    passages = build([str(doc)], tmp_path / "cache")
+    assert passages[0].text.startswith("## C157") and "C158" not in passages[0].text
+    assert len(passages) > 2 and all(p.text.startswith("## C158 Long\n\nSource: https://x/158") for p in passages[1:])

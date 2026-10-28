@@ -46,18 +46,27 @@ class Passage:
 
 
 def _split(text: str) -> list[str]:
-    """Cut a text into passages of about `CHUNK_CHARS` characters, at paragraph boundaries."""
-    text = re.sub(r"[ \t]+", " ", text).strip()
-    if len(text) <= CHUNK_CHARS:
-        return [text] if text else []
-    parts, current = [], ""
-    for para in re.split(r"\n\s*\n", text):
-        if len(current) + len(para) > CHUNK_CHARS and current:
+    """Cut a text into passages of about `CHUNK_CHARS` characters, at paragraph boundaries.
+
+    A Markdown heading always starts a new passage, so that one section (e.g. one error code
+    with its source address) is never mixed with the next one. When a section is longer than
+    one passage, its heading and its "Source:" line are repeated at the top of each passage,
+    so that every passage can be quoted with its origin.
+    """
+    parts = []
+    for section in re.split(r"\n(?=#{1,6} )", re.sub(r"[ \t]+", " ", text)):
+        paras = re.split(r"\n\s*\n", section.strip())
+        header = ""
+        if paras[0].startswith("#"):
+            header = paras[0] + ("\n\n" + paras[1] if len(paras) > 1 and paras[1].startswith("Source:") else "")
+        current = ""
+        for para in paras:
+            if len(current) + len(para) > CHUNK_CHARS and current:
+                parts.append(current.strip())
+                current = header + "\n\n" if header else ""
+            current += para + "\n\n"
+        if current.strip():
             parts.append(current.strip())
-            current = ""
-        current += para + "\n\n"
-    if current.strip():
-        parts.append(current.strip())
     return parts
 
 
