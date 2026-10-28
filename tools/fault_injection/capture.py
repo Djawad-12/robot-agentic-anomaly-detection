@@ -32,7 +32,7 @@ from typing import Any
 import numpy as np
 
 from robot_agentic.config import load_settings, setup_logging
-from robot_agentic.connectors.ursim import URSimConnector, line_time
+from robot_agentic.connectors.ursim import URSimConnector, line_time, send_script
 from robot_agentic.core.checks import stream_gaps
 from robot_agentic.core.recorder import Recorder
 
@@ -43,6 +43,10 @@ log = logging.getLogger(__name__)
 LOG_FILES = ["/ursim/URControl.log", "/ursim/polyscope.log", "/ursim/log_history.txt"]
 FLIGHT_REPORTS = "/ursim/flightreports"
 STATE_CHANNELS = ["robot_mode", "safety_mode", "speed_scaling"]
+
+# Faults that stay invisible while the robot is idle: a URScript command sent 2 s after the
+# injection forces the controller to act (and write), so that the consequences show.
+PROBES = {"disk_full": "protective_stop()"}
 
 
 def _docker(container: str, *cmd: str) -> str:
@@ -97,7 +101,12 @@ def capture(fault: str, seconds: float, out_dir: Path) -> Path:
     reports_before = set(_docker(st.ursim_container, "ls", FLIGHT_REPORTS).split())
     injected_at = time.time()
     faults.inject(fault)
-    time.sleep(seconds)
+    if fault in PROBES:
+        time.sleep(2)
+        send_script(st.robot_host, PROBES[fault])
+        time.sleep(seconds - 2)
+    else:
+        time.sleep(seconds)
     rec = recorder.window(injected_at - 2, time.time(), label=f"capture {fault}")
     rec.save(out_dir / "recordings")
     dashboard = {"robot_mode": _safe(connector.dashboard.robot_mode), "safety_status": _safe(connector.dashboard.safety_status)}
@@ -132,6 +141,7 @@ def capture(fault: str, seconds: float, out_dir: Path) -> Path:
         "injected_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(injected_at)),
         "ursim_version": _docker(st.ursim_container, "cat", "/ursim/version.sh").strip(),
         "observed_seconds": seconds,
+        "probe": f"{PROBES[fault]} sent 2 s after the injection" if fault in PROBES else None,
         "dashboard_after_fault": dashboard,
         "primary_fault_codes": [{**asdict(f), "t": round(f.t - injected_at, 3)} for f in rec.faults],
         "new_log_lines": new_lines,
@@ -183,11 +193,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Capture the evidence of a fault provoked on URSim")
     parser.add_argument("fault", help="name of the fault, or 'all'")
     parser.add_argument("--seconds", type=float, default=15.0, help="observation time after the injection")
+    parser.add_argument("--repeat", type=int, default=1, help="number of captures of each fault")
     args = parser.parse_args()
     st = load_settings()
     setup_logging(st)
-    for fault in FAULTS if args.fault == "all" else [args.fault]:
-        print(capture(fault, args.seconds, st.data_dir / "catalogue"))
+    for run in range(1, args.repeat + 1):
+        for fault in FAULTS if args.fault == "all" else [args.fault]:
+            print(f"[{run}/{args.repeat}] {capture(fault, args.seconds, st.data_dir / 'catalogue')}", flush=True)
 
 
 if __name__ == "__main__":

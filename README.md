@@ -61,6 +61,22 @@ docker run -d --name ursim -e ROBOT_MODEL=UR3 \
 # later: docker start ursim
 ```
 
+URSim on its own small disk (needed by the `disk_full` fault, so that filling URSim's disk never
+fills the computer's): a 512 MB disk image, attached without admin rights.
+
+```bash
+truncate -s 512M ~/ursim/ursim-disk.img && mkfs.ext4 -F -q -L ursim ~/ursim/ursim-disk.img
+udisksctl loop-setup -f ~/ursim/ursim-disk.img     # mounted at /run/media/$USER/ursim
+docker run --rm -v /run/media/$USER/ursim:/target --entrypoint sh universalrobots/ursim_e-series \
+  -c 'rm -rf /target/lost+found && cp -a /ursim/. /target/'
+docker run -d --name ursim -e ROBOT_MODEL=UR3 \
+  -p 5900:5900 -p 6080:6080 -p 29999:29999 -p 30001-30004:30001-30004 \
+  -v /run/media/$USER/ursim:/ursim universalrobots/ursim_e-series
+```
+
+After a reboot, attach the disk again before starting URSim:
+`udisksctl loop-setup -f ~/ursim/ursim-disk.img && docker start ursim`.
+
 Documentation: `.venv/bin/python -m tools.fetch_ur_docs` downloads the official Universal Robots error
 code pages (software 5.26, with their web address) into `manuals/ursim/`. PDF manuals (e.g. the
 *Service Manual*) can be added to the same folder. The folder is not versioned.
