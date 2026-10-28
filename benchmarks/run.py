@@ -1,15 +1,16 @@
-"""Mesure l'agent sur les scénarios de pannes : diagnostics justes, temps et coût.
+"""Measures the agent on the fault scenarios: correct diagnoses, time and cost.
 
-Pour chaque scénario de `tools/fault_injection/scenarios.yaml` :
-1. remet URSim en état de marche ;
-2. injecte la panne ;
-3. lance l'agent (réveillé par une alerte, ou en contrôle ponctuel), tests acceptés
-   automatiquement puisque la machine est simulée ;
-4. compare la cause racine du rapport à la réponse attendue ;
-5. répare la panne.
+For each scenario of `tools/fault_injection/scenarios.yaml`:
+1. brings URSim back to a working state;
+2. injects the fault;
+3. runs the agent (woken up by an alert, or as a spot check), with tests approved
+   automatically since the machine is simulated;
+4. grades the report's root cause twice: by keywords, and by a Claude judge that compares
+   it with the expected cause;
+5. repairs the fault.
 
-Usage : python -m benchmarks.run [--only id1,id2] [--repeat N]
-Chaque appel à Claude est payant : le coût de la série s'affiche à la fin.
+Usage: python -m benchmarks.run [--only id1,id2] [--repeat N]
+Every call to Claude is paid: the cost of the series is shown at the end.
 """
 
 from __future__ import annotations
@@ -21,12 +22,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+import anthropic
 import yaml
 
 from robot_agentic.__main__ import build_runtime
-from robot_agentic.agent.graph import build_graph
-from robot_agentic.agent.llm import ClaudeClient
-from robot_agentic.agent.modes import run_check
+from robot_agentic.agent.graph import build_graph, run_check
+from robot_agentic.agent.llm import ClaudeClient, cost_usd
 from tools.fault_injection.inject import URSimFaults
 
 log = logging.getLogger(__name__)
@@ -34,15 +35,44 @@ log = logging.getLogger(__name__)
 SCENARIOS = Path(__file__).parent.parent / "tools" / "fault_injection" / "scenarios.yaml"
 RESULTS = Path(__file__).parent / "results"
 
+JUDGE_SCHEMA = {
+    "type": "object",
+    "properties": {"correct": {"type": "boolean"}, "reason": {"type": "string"}},
+    "required": ["correct", "reason"],
+    "additionalProperties": False,
+}
+
+
+def judge(client: anthropic.Anthropic, model: str, expected: str, root_cause: str) -> tuple[bool, str, float]:
+    """Ask Claude whether the diagnosed root cause matches the expected one.
+
+    Returns:
+        The verdict, the judge's one-sentence reason, and the cost of the call in dollars.
+    """
+    response = client.messages.create(
+        model=model,
+        max_tokens=4000,
+        output_config={"effort": "low", "format": {"type": "json_schema", "schema": JUDGE_SCHEMA}},
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "You grade a robot diagnostic agent. Does the diagnosed root cause identify the same root cause "
+                    "as the expected one? Wording may differ; extra correct detail is fine; a different or vaguer "
+                    "cause is wrong. Give a one-sentence reason.\n\n"
+                    f"Expected root cause: {expected}\n\nDiagnosed root cause: {root_cause}"
+                ),
+            }
+        ],
+    )
+    verdict = json.loads(next(b.text for b in response.content if b.type == "text"))
+    return bool(verdict["correct"]), verdict["reason"], cost_usd(model, response.usage)
+
 
 def main() -> None:
-    """Joue les scénarios demandés, puis affiche et sauvegarde les résultats.
-
-    Notation : un diagnostic est juste si la cause racine du rapport contient au moins un
-    mot de chaque groupe de `expected.keywords` (sans tenir compte de la casse).
-    """
+    """Play the requested scenarios, then show and save the results."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--only", help="identifiants séparés par des virgules")
+    parser.add_argument("--only", help="comma-separated scenario ids")
     parser.add_argument("--repeat", type=int, default=1)
     args = parser.parse_args()
 
@@ -51,17 +81,19 @@ def main() -> None:
         wanted = set(args.only.split(","))
         scenarios = [s for s in scenarios if s["id"] in wanted]
 
-    faults = URSimFaults()
-    faults.wait_ready()
     rt = build_runtime(auto_approve=True)
     tb, hmi, st = rt.toolbox, rt.hmi, rt.settings
+    faults = URSimFaults(st.robot_host, st.ursim_container)
+    faults.wait_ready()
+    judge_client = anthropic.Anthropic()
     rows: list[dict[str, Any]] = []
     for scenario in scenarios * args.repeat:
-        llm = ClaudeClient(model=st.model, log_path=st.llm_log)
+        llm = ClaudeClient(model=st.claude_model, log_path=st.llm_log)
         hmi.say(f"=== {scenario['id']} ===")
-        log.info("scénario %s", scenario["id"])
+        log.info("scenario %s", scenario["id"])
         started = time.time()
         if scenario["mode"] == "loop":
+            # Subscribe before injecting, so that no event of the fault is missed.
             events = tb.recorder.subscribe()
             graph = build_graph(tb, llm, hmi, events=events, reports_dir=st.reports_dir, watch_timeout=60)
             injected_at = time.time()
@@ -78,32 +110,38 @@ def main() -> None:
 
         report = state.get("report")
         root_cause = report["root_cause"] if report else ""
-        correct = bool(report) and all(any(k.lower() in root_cause.lower() for k in group) for group in scenario["expected"]["keywords"])
+        expected = scenario["expected"]
+        keywords_ok = bool(report) and all(any(k.lower() in root_cause.lower() for k in group) for group in expected["keywords"])
+        judge_ok, judge_reason, judge_cost = (
+            judge(judge_client, st.claude_model, expected["cause"], root_cause) if report else (False, "no report", 0.0)
+        )
         rows.append({
             "id": scenario["id"],
             "detected": detected,
             "detection_s": detection_s,
-            "correct": correct,
+            "keywords_ok": keywords_ok,
+            "judge_ok": judge_ok,
+            "judge_reason": judge_reason,
             "root_cause": root_cause or None,
-            "expected": scenario["expected"]["cause"],
+            "expected": expected["cause"],
             "seconds": round(elapsed, 1),
             "llm_calls": llm.usage.calls,
-            "cost_usd": round(llm.usage.cost_usd, 4),
+            "cost_usd": round(llm.usage.cost_usd + judge_cost, 4),
             "report_path": state.get("report_path"),
         })  # fmt: skip
-        log.info("scénario %s : %s en %.0f s, %.3f $", scenario["id"], "juste" if correct else "faux", elapsed, llm.usage.cost_usd)
+        log.info("scenario %s: keywords %s, judge %s, %.0f s", scenario["id"], keywords_ok, judge_ok, elapsed)
         faults.revert(scenario["fault"])
 
     RESULTS.mkdir(exist_ok=True)
     out = RESULTS / f"{time.strftime('%Y%m%d-%H%M%S')}.json"
     out.write_text(json.dumps(rows, ensure_ascii=False, indent=2))
     n = len(rows)
-    correct_count = sum(r["correct"] for r in rows)
-    print(f"\nDiagnostics justes : {correct_count}/{n} ({100 * correct_count / n:.0f} %)")
-    print(f"Temps moyen : {sum(r['seconds'] for r in rows) / n:.0f} s ; coût total : {sum(r['cost_usd'] for r in rows):.3f} $")
+    print(f"\nCorrect diagnoses: keywords {sum(r['keywords_ok'] for r in rows)}/{n}, judge {sum(r['judge_ok'] for r in rows)}/{n}")
+    print(f"Mean time: {sum(r['seconds'] for r in rows) / n:.0f} s; total cost: ${sum(r['cost_usd'] for r in rows):.3f}")
     for r in rows:
-        print(f"  {'✔' if r['correct'] else '✘'} {r['id']:20} {r['seconds']:>6.0f} s {r['cost_usd']:>7.3f} $  {r['root_cause']}")
-    print(f"Résultats : {out}")
+        marks = ("✔" if r["keywords_ok"] else "✘") + ("✔" if r["judge_ok"] else "✘")
+        print(f"  {marks} {r['id']:20} {r['seconds']:>6.0f} s ${r['cost_usd']:>7.3f}  {r['root_cause']}")
+    print(f"Results: {out}")
 
 
 if __name__ == "__main__":

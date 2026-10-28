@@ -1,3 +1,3 @@
-"""Robot Agentic : agent de diagnostic qui remonte à la cause racine d'une panne."""
+"""Robot Agentic: software anomaly detection agent that finds the root cause of a robot failure."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

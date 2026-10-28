@@ -4,7 +4,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
-# Données produites à l'exécution
+# Data produced at run time
 data/
 benchmarks/results/*
 !benchmarks/results/.gitkeep

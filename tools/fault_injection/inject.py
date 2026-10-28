@@ -1,69 +1,67 @@
-"""Pannes logicielles et de configuration provoquées sur URSim.
+"""Software and configuration faults provoked on URSim.
 
-`URSimFaults` sait provoquer chaque panne (`inject`) et remettre le simulateur en état de
-marche (`revert`). Les scénarios (`scenarios.yaml`) associent une panne à la bonne réponse
-attendue de l'agent ; les benchmarks s'en servent pour noter ses diagnostics.
+`URSimFaults` knows how to provoke each fault (`inject`) and how to bring the simulator back
+to a working state (`revert`). The scenarios (`scenarios.yaml`) pair a fault with the answer
+expected from the agent; the benchmarks use them to grade its diagnoses.
 
-Usage :
+Usage:
     python -m tools.fault_injection.inject list
-    python -m tools.fault_injection.inject <panne>          # injecte
-    python -m tools.fault_injection.inject <panne> --revert # répare
+    python -m tools.fault_injection.inject <fault>           # inject
+    python -m tools.fault_injection.inject <fault> --revert  # repair
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-import os
 import subprocess
 import threading
 import time
 
 from robot_agentic.config import load_settings, setup_logging
-from robot_agentic.connectors.ursim import urscript
-from robot_agentic.connectors.ursim.dashboard import Dashboard
+from robot_agentic.connectors.ursim import Dashboard, send_script
 
 log = logging.getLogger(__name__)
 
 FAULTS = {
-    "wrong_payload": "Charge déclarée à 2 kg alors que l'outil est vide : les couples ne correspondent plus.",
-    "script_error": "Programme URScript invalide envoyé au contrôleur.",
-    "protective_stop": "Arrêt de protection : le robot s'arrête et refuse de bouger.",
-    "controller_crash": "Arrêt brutal du processus du contrôleur (URControl).",
-    "freeze": "Gel complet du contrôleur pendant quelques secondes (communication perdue), puis reprise.",
+    "wrong_payload": "Payload declared as 2 kg while the tool is empty: the torques no longer match.",
+    "script_error": "Invalid URScript program sent to the controller.",
+    "protective_stop": "Protective stop: the robot stops and refuses to move.",
+    "controller_crash": "The controller process (URControl) is killed.",
+    "freeze": "The whole controller is frozen for a few seconds (communication lost), then resumes.",
 }
 
 
 class URSimFaults:
-    """Provoque et répare les pannes de `FAULTS` sur un URSim lancé dans Docker.
+    """Provokes and repairs the faults of `FAULTS` on a URSim running in Docker.
 
     Args:
-        host: adresse du contrôleur.
-        container: nom du conteneur Docker d'URSim.
-        freeze_s: durée du gel pour la panne « freeze », en secondes.
+        host: controller address.
+        container: name of the URSim Docker container.
+        freeze_s: duration of the "freeze" fault, in seconds.
     """
 
-    def __init__(self, host: str | None = None, container: str | None = None, freeze_s: float = 8.0) -> None:
-        """Lit l'adresse et le conteneur dans l'environnement s'ils ne sont pas donnés."""
-        self.host = host or os.environ.get("ROBOT_HOST", "127.0.0.1")
-        self.container = container or os.environ.get("URSIM_CONTAINER", "ursim")
+    def __init__(self, host: str, container: str, freeze_s: float = 8.0) -> None:
+        """Remember the controller address and the container name."""
+        self.host = host
+        self.container = container
         self.freeze_s = freeze_s
 
     def inject(self, fault: str) -> None:
-        """Provoque une panne et rend la main aussitôt (le gel se lève tout seul après `freeze_s`).
+        """Provoke a fault and return at once (the freeze lifts by itself after `freeze_s`).
 
         Raises:
-            ValueError: si la panne est inconnue.
-            subprocess.CalledProcessError: si une commande Docker échoue.
+            ValueError: if the fault is unknown.
+            subprocess.CalledProcessError: if a Docker command fails.
         """
-        log.info("injection de la panne %s", fault)
+        log.info("injecting fault %s", fault)
         match fault:
             case "wrong_payload":
-                urscript.send(self.host, "set_target_payload(2.0, [0, 0, 0.05])")
+                send_script(self.host, "set_target_payload(2.0, [0, 0, 0.05])")
             case "script_error":
-                urscript.send(self.host, "movej(get_actual_joint_positions(), a=1.0, v=)")
+                send_script(self.host, "movej(get_actual_joint_positions(), a=1.0, v=)")
             case "protective_stop":
-                urscript.send(self.host, "protective_stop()")
+                send_script(self.host, "protective_stop()")
             case "controller_crash":
                 subprocess.run(["docker", "exec", self.container, "pkill", "-f", "URControl"], capture_output=True, timeout=30)
             case "freeze":
@@ -72,22 +70,22 @@ class URSimFaults:
                     self.freeze_s, lambda: subprocess.run(["docker", "unpause", self.container], capture_output=True, timeout=30)
                 ).start()
             case _:
-                raise ValueError(f"panne inconnue : {fault}")
+                raise ValueError(f"unknown fault: {fault}")
 
     def revert(self, fault: str) -> None:
-        """Répare une panne et remet le robot en marche (RUNNING).
+        """Repair a fault and bring the robot back to RUNNING.
 
-        Le contrôleur arrêté ne redémarre pas tout seul : on redémarre le conteneur, ce qui
-        prend environ 20 secondes.
+        A killed controller does not restart by itself: the container is restarted, which
+        takes about 20 seconds.
 
         Raises:
-            ValueError: si la panne est inconnue.
-            TimeoutError: si le contrôleur ne répond plus après la réparation.
+            ValueError: if the fault is unknown.
+            TimeoutError: if the controller does not answer after the repair.
         """
-        log.info("réparation de la panne %s", fault)
+        log.info("repairing fault %s", fault)
         match fault:
             case "wrong_payload":
-                urscript.send(self.host, "set_target_payload(0.0, [0, 0, 0])")
+                send_script(self.host, "set_target_payload(0.0, [0, 0, 0])")
             case "script_error" | "protective_stop":
                 pass
             case "controller_crash":
@@ -95,17 +93,17 @@ class URSimFaults:
             case "freeze":
                 subprocess.run(["docker", "unpause", self.container], capture_output=True, timeout=30)
             case _:
-                raise ValueError(f"panne inconnue : {fault}")
+                raise ValueError(f"unknown fault: {fault}")
         self.wait_ready()
 
     def wait_ready(self, timeout: float = 120.0) -> str:
-        """Attend que le contrôleur réponde, puis remet le robot en marche.
+        """Wait until the controller answers, then bring the robot back to RUNNING.
 
         Returns:
-            Le mode du robot (RUNNING si tout va bien).
+            The robot mode (RUNNING if everything is fine).
 
         Raises:
-            TimeoutError: si le contrôleur ne répond pas dans le délai.
+            TimeoutError: if the controller does not answer in time.
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -114,29 +112,30 @@ class URSimFaults:
             except OSError:
                 time.sleep(2)
                 continue
-            # Le Dashboard répond avant que le contrôleur accepte la mise sous tension.
+            # The Dashboard answers before the controller accepts to power on.
             time.sleep(3)
             return Dashboard(self.host).power_on_and_release()
-        raise TimeoutError("le contrôleur ne répond pas")
+        raise TimeoutError("the controller does not answer")
 
 
 def main() -> None:
-    """Ligne de commande : liste, injecte ou répare une panne."""
-    parser = argparse.ArgumentParser(description="Pannes provoquées sur URSim")
-    parser.add_argument("fault", help="nom de la panne, ou « list »")
-    parser.add_argument("--revert", action="store_true", help="répare au lieu d'injecter")
+    """Command line: list, inject or repair a fault."""
+    parser = argparse.ArgumentParser(description="Faults provoked on URSim")
+    parser.add_argument("fault", help="name of the fault, or 'list'")
+    parser.add_argument("--revert", action="store_true", help="repair instead of injecting")
     args = parser.parse_args()
-    setup_logging(load_settings())
+    settings = load_settings()
+    setup_logging(settings)
     if args.fault == "list":
         for name, description in FAULTS.items():
             print(f"{name:18} {description}")
         return
-    faults = URSimFaults()
+    faults = URSimFaults(settings.robot_host, settings.ursim_container)
     if args.revert:
         faults.revert(args.fault)
     else:
         faults.inject(args.fault)
-    print(f"{args.fault} : {'réparé' if args.revert else 'injecté'}")
+    print(f"{args.fault}: {'repaired' if args.revert else 'injected'}")
 
 
 if __name__ == "__main__":

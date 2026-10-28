@@ -1,6 +1,7 @@
-# Robot Agentic — agent de diagnostic
+# Robot Agentic — software anomaly detection agent
 
-Lire et appliquer les principes de code : @CONTRIBUTING.md
+Read and apply the code principles: @CONTRIBUTING.md
+Decisions and work plan: @summary.md
 
-Avant tout commit : `.venv/bin/ruff check` et `.venv/bin/python -m pytest` passent.
-URSim tourne dans le conteneur Docker `ursim` (voir README.md).
+Before every commit: `.venv/bin/ruff check` and `.venv/bin/python -m pytest` pass.
+URSim runs in the Docker container `ursim` (see README.md).

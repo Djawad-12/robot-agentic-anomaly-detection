@@ -1,1 +1,1 @@
-"""Tests automatiques : faux connecteur et faux LLM, sans réseau ni coût."""
+"""Automatic tests: fake connector and fake LLM, without network or cost."""

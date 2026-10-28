@@ -1,1 +1,1 @@
-"""Pannes provoquées sur URSim et scénarios attendus."""
+"""Faults provoked on URSim and the expected scenarios."""

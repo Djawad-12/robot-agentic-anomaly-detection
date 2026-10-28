@@ -1,1 +1,1 @@
-"""L'agent : graphe LangGraph, outils, modes et appels à Claude."""
+"""The agent: LangGraph investigation graph, tools, data formatting and Claude calls."""

@@ -1,8 +1,12 @@
-"""Enregistreur : mémorise les trois flux temps réel et en découpe des enregistrements alignés.
+"""Recorder: keeps the three live streams in memory and cuts aligned recordings out of them.
 
-Le `Recorder` lit en continu les signaux, le journal et les codes d'erreur dans des tampons
-circulaires. Un enregistrement est une simple découpe de ces tampons entre deux instants :
-on peut donc enregistrer un test (avant, pendant, après) sans rien rater du début.
+The `Recorder` reads the signals, the log and the fault codes continuously into ring
+buffers. A recording is a plain slice of those buffers between two instants: a test can be
+recorded before, during and after it without missing its start.
+
+Signals are stored in one preallocated numpy array (rows = instants, columns = channels)
+rather than one Python object per sample: 120 s at 500 Hz on 63 channels takes about 60 MB
+instead of more than 200 MB, which matters on a Raspberry Pi.
 """
 
 from __future__ import annotations
@@ -16,13 +20,13 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from .events import FaultCode, LogLine, Sample
+from .events import FaultCode, Level, LogLine, Sample
 from .interfaces import Connector
 
 log = logging.getLogger(__name__)
@@ -30,11 +34,10 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class Recording:
-    """Signaux, journal et codes d'erreur entre deux instants.
+    """Signals, log lines and fault codes between two instants.
 
-    `t` contient l'instant de chaque échantillon ; chaque tableau de `channels` a la même
-    longueur que `t`. Une voie absente d'un échantillon vaut NaN. `meta["test"]` identifie
-    le test enregistré, pour retrouver sa référence.
+    `t` holds the instant of each sample; every array in `channels` has the same length as
+    `t`. A channel missing from a sample is NaN.
     """
 
     id: str
@@ -46,38 +49,37 @@ class Recording:
     channels: dict[str, np.ndarray]
     logs: list[LogLine] = field(default_factory=list)
     faults: list[FaultCode] = field(default_factory=list)
-    meta: dict[str, Any] = field(default_factory=dict)
 
     @property
     def duration(self) -> float:
-        """Durée de la fenêtre enregistrée, en secondes."""
+        """Length of the recorded window, in seconds."""
         return self.t1 - self.t0
 
     @property
     def rate_hz(self) -> float:
-        """Rythme moyen des échantillons, en Hz (0 s'il y en a moins de deux)."""
+        """Mean sample rate, in Hz (0 if there are fewer than two samples)."""
         return (len(self.t) - 1) / (self.t[-1] - self.t[0]) if len(self.t) > 1 else 0.0
 
     def resample(self, hz: float, channels: list[str] | None = None) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-        """Ramène l'enregistrement à `hz` points par seconde, par moyenne sur des fenêtres.
+        """Bring the recording down to `hz` points per second by averaging over windows.
 
-        Une moyenne (et non un simple saut d'échantillons) conserve l'énergie des pics courts.
-        Si `hz` dépasse le rythme d'origine, les données sont rendues telles quelles.
+        Averaging (rather than skipping samples) keeps the energy of short peaks. If `hz`
+        is above the original rate, the data is returned as is.
 
         Args:
-            hz: rythme voulu.
-            channels: voies à garder ; toutes si None ou vide.
+            hz: wanted rate.
+            channels: channels to keep; all of them if None or empty.
 
         Returns:
-            Les instants, relatifs au début de la fenêtre (s), et les voies rééchantillonnées.
+            The instants, relative to the start of the window (s), and the resampled channels.
 
         Raises:
-            KeyError: si une voie demandée n'existe pas dans l'enregistrement.
+            KeyError: if a requested channel does not exist in the recording.
         """
         if channels:
             missing = [c for c in channels if c not in self.channels]
             if missing:
-                raise KeyError(f"voies inconnues : {missing}")
+                raise KeyError(f"unknown channels: {missing}")
             data = {c: self.channels[c] for c in channels}
         else:
             data = self.channels
@@ -89,7 +91,7 @@ class Recording:
         return t, {k: v[:n].reshape(-1, step).mean(axis=1) for k, v in data.items()}
 
     def save(self, directory: Path) -> Path:
-        """Écrit l'enregistrement dans `directory/<id>.json.gz` et renvoie le chemin."""
+        """Write the recording to `directory/<id>.json.gz` and return the path."""
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{self.id}.json.gz"
         payload = {
@@ -100,21 +102,20 @@ class Recording:
             "t1": self.t1,
             "t": self.t.tolist(),
             "channels": {k: v.tolist() for k, v in self.channels.items()},
-            "logs": [line.model_dump(mode="json") for line in self.logs],
-            "faults": [f.model_dump(mode="json") for f in self.faults],
-            "meta": self.meta,
+            "logs": [asdict(x) for x in self.logs],
+            "faults": [asdict(x) for x in self.faults],
         }
         with gzip.open(path, "wt", encoding="utf-8") as fh:
             json.dump(payload, fh)
-        log.debug("enregistrement %s sauvegardé (%d points, %d voies)", self.id, len(self.t), len(self.channels))
+        log.debug("recording %s saved (%d points, %d channels)", self.id, len(self.t), len(self.channels))
         return path
 
     @classmethod
     def load(cls, path: Path) -> Recording:
-        """Relit un enregistrement écrit par `save`.
+        """Read back a recording written by `save`.
 
         Raises:
-            FileNotFoundError: si le fichier n'existe pas.
+            FileNotFoundError: if the file does not exist.
         """
         with gzip.open(path, "rt", encoding="utf-8") as fh:
             p = json.load(fh)
@@ -124,34 +125,36 @@ class Recording:
             machine=p["machine"],
             t0=p["t0"],
             t1=p["t1"],
-            t=np.asarray(p["t"]),
-            channels={k: np.asarray(v) for k, v in p["channels"].items()},
-            logs=[LogLine(**x) for x in p["logs"]],
-            faults=[FaultCode(**x) for x in p["faults"]],
-            meta=p.get("meta", {}),
+            t=np.asarray(p["t"], dtype=float),
+            channels={k: np.asarray(v, dtype=float) for k, v in p["channels"].items()},
+            logs=[LogLine(**{**x, "level": Level(x["level"])}) for x in p["logs"]],
+            faults=[FaultCode(**{**x, "level": Level(x["level"])}) for x in p["faults"]],
         )
 
 
 class Recorder:
-    """Lit les flux du connecteur en continu et découpe des enregistrements à la demande.
+    """Reads the connector's streams continuously and cuts recordings on demand.
 
-    Trois fils d'exécution (signaux, journal, codes d'erreur) remplissent des tampons
-    circulaires. Un flux qui s'interrompt (machine arrêtée, connexion perdue) est relancé
-    toutes les secondes ; la cause est gardée dans `errors` et journalisée, car une perte de
-    données est elle-même une information pour le diagnostic.
+    Three threads (signals, log, fault codes) fill ring buffers. A stream that stops
+    (machine off, connection lost) is restarted every second; the cause is kept in `errors`
+    and logged, because losing data is itself a clue for the diagnosis.
 
     Args:
-        connector: la machine dont on lit les flux.
-        directory: dossier où `record` sauvegarde les enregistrements.
-        history_s: profondeur des tampons, en secondes.
-        max_rate_hz: rythme maximal attendu des signaux, pour dimensionner le tampon.
+        connector: the machine whose streams are read.
+        directory: folder where `record` saves recordings.
+        history_s: depth of the buffers, in seconds.
+        max_rate_hz: highest expected signal rate, to size the signal buffer.
     """
 
     def __init__(self, connector: Connector, directory: Path, history_s: float = 120.0, max_rate_hz: float = 500.0) -> None:
-        """Prépare les tampons ; la lecture ne commence qu'avec `start`."""
+        """Allocate the buffers; reading only starts with `start`."""
         self.connector = connector
         self.directory = directory
-        self._samples: deque[Sample] = deque(maxlen=int(history_s * max_rate_hz))
+        self._capacity = int(history_s * max_rate_hz)
+        self._t = np.full(self._capacity, np.nan)
+        self._data = np.full((self._capacity, 0), np.nan)
+        self._columns: dict[str, int] = {}
+        self._count = 0
         self._logs: deque[LogLine] = deque(maxlen=5000)
         self._faults: deque[FaultCode] = deque(maxlen=1000)
         self._subscribers: list[queue.Queue[LogLine | FaultCode]] = []
@@ -160,103 +163,121 @@ class Recorder:
         self.errors: dict[str, str] = {}
 
     def start(self) -> Recorder:
-        """Lance la lecture des trois flux en arrière-plan (sans effet si elle tourne déjà)."""
+        """Start reading the three streams in the background (no effect if already running)."""
         if self._threads:
             return self
-        streams: list[tuple[str, Callable[[], Iterator[Any]], deque[Any]]] = [
-            ("signals", self.connector.signals, self._samples),
-            ("logs", self.connector.logs, self._logs),
-            ("faults", self.connector.faults, self._faults),
+        streams: list[tuple[str, Callable[[], Iterator[Any]], Callable[[Any], None]]] = [
+            ("signals", self.connector.signals, self._add_sample),
+            ("logs", self.connector.logs, lambda x: self._add_event(self._logs, x)),
+            ("faults", self.connector.faults, lambda x: self._add_event(self._faults, x)),
         ]
         for name, stream, sink in streams:
             th = threading.Thread(target=self._pump, args=(name, stream, sink), name=f"recorder-{name}", daemon=True)
             th.start()
             self._threads.append(th)
-        log.info("lecture des flux de %s démarrée", self.connector.name)
+        log.info("started reading the streams of %s", self.connector.name)
         return self
 
-    def _pump(self, name: str, stream: Callable[[], Iterator[Any]], sink: deque[Any]) -> None:
-        """Boucle d'un fil de lecture : remplit le tampon, sans jamais s'arrêter.
-
-        Les journaux et codes d'erreur sont aussi poussés aux files d'abonnement (`subscribe`).
-        """
+    def _pump(self, name: str, stream: Callable[[], Iterator[Any]], sink: Callable[[Any], None]) -> None:
+        """Loop of one reader thread: feeds `sink` with every item, and never stops."""
         while True:
             try:
                 for item in stream():
-                    with self._lock:
-                        sink.append(item)
-                    if name != "signals":
-                        for q in self._subscribers:
-                            q.put(item)
+                    sink(item)
                     if name in self.errors:
-                        log.info("flux %s rétabli", name)
+                        log.info("stream %s restored", name)
                         del self.errors[name]
-                self.errors[name] = "flux terminé"
-            except Exception as exc:  # noqa: BLE001 - toute erreur réseau ou de processus doit être survécue
+                self.errors[name] = "stream ended"
+            except Exception as exc:  # noqa: BLE001 - any network or process error must be survived
                 self.errors[name] = f"{type(exc).__name__}: {exc}"
-            log.warning("flux %s interrompu (%s), nouvelle tentative dans 1 s", name, self.errors[name])
+            log.warning("stream %s interrupted (%s), retrying in 1 s", name, self.errors[name])
             time.sleep(1.0)
 
+    def _add_sample(self, sample: Sample) -> None:
+        """Write one sample into the next row of the signal buffer, adding columns for new channels."""
+        with self._lock:
+            new = [k for k in sample.values if k not in self._columns]
+            if new:
+                for i, k in enumerate(new):
+                    self._columns[k] = self._data.shape[1] + i
+                self._data = np.hstack([self._data, np.full((self._capacity, len(new)), np.nan)])
+            row = self._count % self._capacity
+            self._data[row] = np.nan
+            for k, v in sample.values.items():
+                self._data[row, self._columns[k]] = v
+            self._t[row] = sample.t
+            self._count += 1
+
+    def _add_event(self, sink: deque[Any], item: LogLine | FaultCode) -> None:
+        """Keep a log line or fault code, and push it to the subscribed queues (`subscribe`)."""
+        with self._lock:
+            sink.append(item)
+        for q in self._subscribers:
+            q.put(item)
+
     def subscribe(self) -> queue.Queue[LogLine | FaultCode]:
-        """File qui reçoit chaque nouvelle ligne de journal et chaque nouveau code d'erreur."""
+        """Queue that receives every new log line and every new fault code."""
         q: queue.Queue[LogLine | FaultCode] = queue.Queue()
         self._subscribers.append(q)
         return q
 
     def last_sample_age(self) -> float | None:
-        """Âge du dernier échantillon reçu, en secondes (None si aucun n'est encore arrivé)."""
+        """Age of the last sample received, in seconds (None if none has arrived yet)."""
         with self._lock:
-            return time.time() - self._samples[-1].t if self._samples else None
+            return time.time() - self._t[(self._count - 1) % self._capacity] if self._count else None
 
-    def window(self, t0: float, t1: float, label: str = "", meta: dict[str, Any] | None = None) -> Recording:
-        """Découpe les tampons entre `t0` et `t1` en un enregistrement (non sauvegardé)."""
+    def window(self, t0: float, t1: float, label: str = "") -> Recording:
+        """Cut the buffers between `t0` and `t1` into a recording (not saved).
+
+        Channels with no value in the window are left out.
+        """
         with self._lock:
-            samples = [s for s in self._samples if t0 <= s.t <= t1]
+            n = min(self._count, self._capacity)
+            rows = np.arange(self._count - n, self._count) % self._capacity
+            rows = rows[(self._t[rows] >= t0) & (self._t[rows] <= t1)]
+            t = self._t[rows]
+            data = self._data[rows]
+            columns = dict(self._columns)
             logs = [x for x in self._logs if t0 <= x.t <= t1]
             faults = [x for x in self._faults if t0 <= x.t <= t1]
-        names = sorted({k for s in samples for k in s.values})
-        channels = {k: np.array([s.values.get(k, np.nan) for s in samples]) for k in names}
+        channels = {k: data[:, i] for k, i in sorted(columns.items()) if np.isfinite(data[:, i]).any()}
         return Recording(
             id=time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4],
             label=label,
             machine=self.connector.name,
             t0=t0,
             t1=t1,
-            t=np.array([s.t for s in samples]),
+            t=t,
             channels=channels,
             logs=logs,
             faults=faults,
-            meta=meta or {},
         )
 
-    def latest(self, seconds: float, label: str = "derniers instants") -> Recording:
-        """Enregistrement des `seconds` dernières secondes (non sauvegardé)."""
+    def latest(self, seconds: float, label: str = "latest") -> Recording:
+        """Recording of the last `seconds` seconds (not saved)."""
         t1 = time.time()
         return self.window(t1 - seconds, t1, label)
 
-    def record(
-        self, action: Callable[[], Any], label: str, before: float = 1.0, after: float = 1.5, meta: dict[str, Any] | None = None
-    ) -> tuple[Recording, Any]:
-        """Enregistre tous les flux autour d'une action, puis sauvegarde l'enregistrement.
+    def record(self, action: Callable[[], Any], label: str, before: float = 1.0, after: float = 1.5) -> tuple[Recording, Any]:
+        """Record every stream around an action, then save the recording.
 
         Args:
-            action: fonction sans argument qui déclenche le test et attend sa fin.
-            label: description lisible du test.
-            before: secondes gardées avant l'action, pour voir l'état de départ.
-            after: secondes attendues après l'action, pour voir le retour au repos.
-            meta: métadonnées gardées avec l'enregistrement (dont `test`).
+            action: function without arguments that starts the test and waits for its end.
+            label: readable description of the test.
+            before: seconds kept before the action, to see the starting state.
+            after: seconds waited after the action, to see the return to rest.
 
         Returns:
-            L'enregistrement et la valeur renvoyée par `action`.
+            The recording and the value returned by `action`.
         """
         t0 = time.time() - before
-        log.info("enregistrement : %s", label)
+        log.info("recording: %s", label)
         result = action()
         time.sleep(after)
-        rec = self.window(t0, time.time(), label, meta)
+        rec = self.window(t0, time.time(), label)
         rec.save(self.directory)
         log.info(
-            "enregistrement %s : %.1f s, %d points, %d lignes de journal, %d codes d'erreur",
+            "recording %s: %.1f s, %d points, %d log lines, %d fault codes",
             rec.id,
             rec.duration,
             len(rec.t),
@@ -266,5 +287,5 @@ class Recorder:
         return rec, result
 
     def load(self, recording_id: str) -> Recording:
-        """Relit un enregistrement sauvegardé par `record`, à partir de son identifiant."""
+        """Read back a recording saved by `record`, from its id."""
         return Recording.load(self.directory / f"{recording_id}.json.gz")

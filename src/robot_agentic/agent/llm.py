@@ -1,9 +1,9 @@
-"""Appels à Claude : authentification, paramètres du modèle, coût et journal des appels.
+"""Calls to Claude: model settings, prompt caching, cost and call log.
 
-Toutes les requêtes passent par `ClaudeClient.create`, qui enregistre pour chacune les
-tokens, le coût estimé et la durée dans `data/llm_calls.jsonl` (repris par les benchmarks).
-L'authentification suit l'ordre du SDK Anthropic : ANTHROPIC_API_KEY, puis le profil
-`ant auth login`.
+Every request of an investigation goes through `ClaudeClient.create`, which records its
+tokens, estimated cost and duration in `data/llm_calls.jsonl` (used by the benchmarks).
+Authentication follows the Anthropic SDK order: ANTHROPIC_API_KEY, then the `ant auth login`
+profile.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -19,49 +19,59 @@ import anthropic
 
 log = logging.getLogger(__name__)
 
-# Prix publics en $ par million de tokens : (entrée, sortie, lecture du cache).
-# L'écriture dans le cache coûte 1,25 fois le prix d'entrée.
+# Public prices in $ per million tokens: (input, output, cache read).
+# Writing to the cache costs 1.25 times the input price.
 PRICES = {"claude-opus-5-5": (4.0, 20.0, 0.20), "claude-sonnet-5-5": (2.0, 10.0, 0.20), "claude-haiku-5-5": (0.10, 0.50, 0.01)}
 
 
+def cost_usd(model: str, usage: Any) -> float:
+    """Estimated cost of one call, in dollars, from the `usage` field of an API response."""
+    price_in, price_out, price_cache = PRICES.get(model, PRICES["claude-opus-5-5"])
+    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    return (
+        usage.input_tokens * price_in + cache_write * price_in * 1.25 + cache_read * price_cache + usage.output_tokens * price_out
+    ) / 1e6
+
+
 class LLM(Protocol):
-    """Ce dont le graphe a besoin ; remplacé par un faux LLM scripté dans les tests."""
+    """What the graph needs; replaced by a scripted fake LLM in the tests."""
 
     def create(self, *, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> Any:
-        """Envoie une requête et renvoie la réponse (objet avec `content` et `stop_reason`)."""
+        """Send a request and return the response (an object with `content` and `stop_reason`)."""
         ...
 
 
 @dataclass
 class Usage:
-    """Cumul des appels d'un client, pour afficher le coût d'une enquête ou d'un benchmark."""
+    """Running total of a client's calls, to show the cost of an investigation or a benchmark."""
 
     calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cost_usd: float = 0.0
-    seconds: float = 0.0
-    log: list[dict[str, Any]] = field(default_factory=list)
 
 
 class ClaudeClient:
-    """Client Claude configuré pour l'agent de diagnostic.
+    """Claude client configured for the diagnostic agent.
 
-    Réglages :
-    - réflexion adaptative (Claude décide quand et combien réfléchir), résumé visible ;
-    - effort `effort` (`high` par défaut : un diagnostic demande de la rigueur) ;
-    - prompt système et outils mis en cache, car identiques à chaque tour d'une enquête ;
-    - modèle de repli automatique si une requête est déclinée par le modèle principal.
+    Settings:
+    - adaptive thinking (Claude decides when and how much to think), visible summary;
+    - effort `effort` (`high` by default: a diagnosis needs rigour);
+    - prompt caching: a breakpoint on the system prompt (shared by every investigation) and
+      automatic caching of the conversation, so each turn only pays the full price for the
+      new messages;
+    - automatic fallback model if the main model declines a request.
 
     Args:
-        model: identifiant du modèle Claude.
-        effort: low, medium, high, xhigh ou max.
-        log_path: fichier JSONL où ajouter une ligne par appel ; None pour ne rien écrire.
+        model: Claude model id.
+        effort: low, medium, high, xhigh or max.
+        log_path: JSONL file where one line per call is appended; None to write nothing.
     """
 
     def __init__(self, model: str = "claude-opus-5-5", effort: str = "high", log_path: Path | None = None) -> None:
-        """Crée le client du SDK ; la clé est lue dans l'environnement à ce moment-là."""
+        """Create the SDK client; the key is read from the environment at this point."""
         self.client = anthropic.Anthropic()
         self.model = model
         self.effort = effort
@@ -69,25 +79,26 @@ class ClaudeClient:
         self.usage = Usage()
 
     def create(self, *, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> Any:
-        """Envoie un tour de l'enquête à Claude et comptabilise son coût.
+        """Send one turn of the investigation to Claude and account for its cost.
 
         Args:
-            system: consignes de l'agent.
-            messages: historique complet de l'enquête, renvoyé à l'identique à chaque tour.
-            tools: définitions des outils.
+            system: the agent's instructions.
+            messages: full history of the investigation, sent again unchanged at each turn.
+            tools: tool definitions.
 
         Returns:
-            La réponse du SDK (`content`, `stop_reason`, `usage`).
+            The SDK response (`content`, `stop_reason`, `usage`).
 
         Raises:
-            anthropic.APIError: en cas d'échec de l'appel, après les nouvelles tentatives du SDK.
+            anthropic.APIError: if the call fails after the SDK's retries.
         """
         started = time.time()
-        log.debug("appel à %s : %d messages, %d outils", self.model, len(messages), len(tools))
+        log.debug("call to %s: %d messages, %d tools", self.model, len(messages), len(tools))
         response = self.client.beta.messages.create(
             model=self.model,
             max_tokens=16000,
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            cache_control={"type": "ephemeral"},
             tools=tools,
             messages=messages,
             thinking={"type": "adaptive", "display": "summarized"},
@@ -98,36 +109,33 @@ class ClaudeClient:
         seconds = time.time() - started
 
         u = response.usage
-        price_in, price_out, price_cache = PRICES.get(self.model, PRICES["claude-opus-5-5"])
+        cost = cost_usd(self.model, u)
         cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
         cache_write = getattr(u, "cache_creation_input_tokens", 0) or 0
-        cost = (u.input_tokens * price_in + cache_write * price_in * 1.25 + cache_read * price_cache + u.output_tokens * price_out) / 1e6
         self.usage.calls += 1
         self.usage.input_tokens += u.input_tokens + cache_write
         self.usage.output_tokens += u.output_tokens
         self.usage.cache_read_tokens += cache_read
         self.usage.cost_usd += cost
-        self.usage.seconds += seconds
-        entry = {
-            "t": time.time(),
-            "model": response.model,
-            "stop_reason": response.stop_reason,
-            "input_tokens": u.input_tokens,
-            "cache_write": cache_write,
-            "cache_read": cache_read,
-            "output_tokens": u.output_tokens,
-            "cost_usd": round(cost, 5),
-            "seconds": round(seconds, 2),
-        }
-        self.usage.log.append(entry)
         if self.log_path:
+            entry = {
+                "t": time.time(),
+                "model": response.model,
+                "stop_reason": response.stop_reason,
+                "input_tokens": u.input_tokens,
+                "cache_write": cache_write,
+                "cache_read": cache_read,
+                "output_tokens": u.output_tokens,
+                "cost_usd": round(cost, 5),
+                "seconds": round(seconds, 2),
+            }
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.log_path.open("a") as fh:
                 fh.write(json.dumps(entry) + "\n")
         log.info(
-            "appel Claude (%s) : %d+%d tokens en entrée (cache %d), %d en sortie, %.4f $, %.1f s, fin : %s",
+            "Claude call (%s): %d+%d input tokens (cache %d), %d output, $%.4f, %.1f s, stop: %s",
             response.model, u.input_tokens, cache_write, cache_read, u.output_tokens, cost, seconds, response.stop_reason,
         )  # fmt: skip
         if response.model != self.model:
-            log.warning("requête traitée par le modèle de repli %s", response.model)
+            log.warning("request handled by the fallback model %s", response.model)
         return response

@@ -1,18 +1,24 @@
-"""Le déroulé d'une enquête, sous forme de graphe LangGraph.
+"""The course of an investigation, as a LangGraph graph, and the agent's two modes.
 
-    surveiller ──alerte──▶ demander l'accord ──oui──▶ enquêter ──▶ rapport
-                                   │                   ▲   │
-                                   non                 └───┘
-                                   ▼        (hypothèse → outil → résultat)
-                                  fin
+    watch ──alert──▶ ask_approval ──yes──▶ investigate ──▶ report
+                          │                  ▲    │
+                          no                 └────┘
+                          ▼          (hypothesis → tool → result)
+                         end
 
-- `watch` attend une alerte des vérifications déterministes (mode boucle) ; en contrôle
-  ponctuel, le graphe commence directement à `investigate`.
-- `ask_approval` demande à l'opérateur s'il veut une analyse de la cause racine ; c'est à
-  partir de là que l'agent a accès aux signaux bruts et à tous les outils.
-- `investigate` est la boucle d'appels à Claude : à chaque tour, Claude appelle des outils,
-  reçoit leurs résultats, et recommence jusqu'à `submit_report`.
-- `report` sauvegarde le rapport et l'affiche.
+- `watch` waits for an alert from the deterministic checks (loop mode); in check mode the
+  graph starts directly at `investigate`.
+- `ask_approval` asks the operator whether to run a root-cause analysis.
+- `investigate` is the loop of calls to Claude: at each turn Claude calls tools, receives
+  their results, and starts again until `submit_report`.
+- `report` saves the report and shows it.
+
+Modes:
+- `run_loop` (monitoring): only the log and the fault codes are watched, by the
+  deterministic checks, without calling the LLM. When an anomaly appears, the operator is
+  offered a root-cause analysis. Then monitoring resumes.
+- `run_check` (spot check): the same investigation, started on demand (e.g. every morning),
+  to find a problem before it becomes a breakdown.
 """
 
 from __future__ import annotations
@@ -29,7 +35,7 @@ from langgraph.graph import END, StateGraph
 
 from ..core.checks import EventWatcher
 from ..core.events import Alert, FaultCode, LogLine
-from ..hmi import HMI
+from ..hmi import CLI
 from .llm import LLM
 from .tools import Toolbox
 
@@ -41,17 +47,17 @@ SYSTEM_PROMPT = resources.files("robot_agentic.agent").joinpath("prompts/system.
 
 
 class State(TypedDict, total=False):
-    """État partagé par les nœuds du graphe.
+    """State shared by the nodes of the graph.
 
     Attributes:
-        mode: "loop" (surveillance) ou "check" (contrôle ponctuel).
-        alert: l'alerte qui a réveillé l'agent (None en contrôle ponctuel).
-        approved: réponse de l'opérateur à la proposition d'analyse.
-        request: demande précise de l'opérateur en contrôle ponctuel (facultative).
-        report: rapport remis par l'agent.
-        report_path: fichier où le rapport a été sauvegardé.
-        turns: nombre d'appels à Claude.
-        error: raison de l'échec si l'enquête finit sans rapport.
+        mode: "loop" (monitoring) or "check" (spot check).
+        alert: the alert that woke the agent up (None in check mode).
+        approved: the operator's answer to the analysis proposal.
+        request: the operator's specific request in check mode (optional).
+        report: report handed in by the agent.
+        report_path: file where the report was saved.
+        turns: number of calls to Claude.
+        error: why the investigation ended without a report.
     """
 
     mode: str
@@ -67,39 +73,39 @@ class State(TypedDict, total=False):
 def build_graph(
     toolbox: Toolbox,
     llm: LLM,
-    hmi: HMI,
+    hmi: CLI,
     events: queue.Queue[LogLine | FaultCode] | None,
     reports_dir: Path,
     watch_timeout: float | None = None,
 ) -> Any:
-    """Construit le graphe d'une enquête.
+    """Build the graph of an investigation.
 
     Args:
-        toolbox: outils de l'agent sur la machine.
-        llm: client Claude (ou faux LLM dans les tests).
-        hmi: interface avec l'opérateur.
-        events: file des nouvelles lignes de journal et codes d'erreur (`Recorder.subscribe`),
-            indispensable en mode boucle.
-        reports_dir: dossier des rapports.
-        watch_timeout: en mode boucle, abandonne la surveillance sans alerte après ce délai
-            (secondes) ; None pour attendre indéfiniment.
+        toolbox: the agent's tools on the machine.
+        llm: Claude client (or a fake LLM in the tests).
+        hmi: interface with the operator.
+        events: queue of new log lines and fault codes (`Recorder.subscribe`), required in
+            loop mode.
+        reports_dir: folder of the reports.
+        watch_timeout: in loop mode, give up watching without an alert after this delay
+            (seconds); None to wait forever.
 
     Returns:
-        Le graphe compilé ; `invoke({"mode": "loop"})` ou `invoke({"mode": "check", ...})`.
+        The compiled graph; `invoke({"mode": "loop"})` or `invoke({"mode": "check", ...})`.
     """
     watcher = EventWatcher()
 
     def watch(state: State) -> State:
-        """Lit les événements jusqu'à la première alerte (ou jusqu'à `watch_timeout`)."""
-        assert events is not None, "le mode boucle a besoin du flux d'événements"
+        """Read the events until the first alert (or until `watch_timeout`)."""
+        assert events is not None, "loop mode needs the event queue"
         deadline = None if watch_timeout is None else time.time() + watch_timeout
-        log.info("surveillance : en attente d'une anomalie")
+        log.info("monitoring: waiting for an anomaly")
         while True:
             try:
                 event = events.get(timeout=1.0)
             except queue.Empty:
                 if deadline and time.time() > deadline:
-                    log.info("surveillance terminée sans anomalie (délai de %.0f s)", watch_timeout)
+                    log.info("monitoring ended without an anomaly (%.0f s delay)", watch_timeout)
                     return {"alert": None}
                 continue
             alert = watcher.feed(event)
@@ -108,21 +114,20 @@ def build_graph(
                 return {"alert": alert}
 
     def ask_approval(state: State) -> State:
-        """Propose l'analyse de la cause racine à l'opérateur."""
+        """Offer the root-cause analysis to the operator."""
         alert = state["alert"]
         assert alert is not None
-        approved = hmi.confirm(f"Anomalie : {alert.reason}. Lancer une analyse de la cause racine ?")
-        log.info("analyse %s par l'opérateur", "acceptée" if approved else "refusée")
+        approved = hmi.confirm(f"Anomaly: {alert.reason}. Start a root-cause analysis?")
+        log.info("analysis %s by the operator", "accepted" if approved else "declined")
         return {"approved": approved}
 
     def investigate(state: State) -> State:
-        """Boucle d'enquête avec Claude, jusqu'au rapport ou à `MAX_TURNS` tours.
+        """Investigation loop with Claude, until the report or `MAX_TURNS` turns.
 
-        Le premier message donne à l'agent le contexte qu'il n'a pas à aller chercher :
-        l'alerte ou la demande, l'état de la machine, les codes d'erreur et le journal des
-        deux dernières minutes, et les références disponibles. L'historique n'est jamais
-        modifié, seulement complété : c'est ce qui permet la mise en cache et la reprise de
-        la réflexion de Claude d'un tour à l'autre.
+        The first message gives the agent the context it does not have to fetch: the alert or
+        the request, the machine's state, the fault codes and the log of the last two minutes.
+        The history is never modified, only extended: this is what allows prompt caching and
+        keeps Claude's reasoning from one turn to the next.
         """
         toolbox.safety.reset()
         toolbox.report = None
@@ -130,24 +135,19 @@ def build_graph(
 
         alert = state.get("alert")
         if alert:
-            head = f"Anomalie détectée : {alert.reason} (gravité {alert.severity.value}).\nIndices :\n" + "\n".join(
+            head = f"Anomaly detected: {alert.reason} (severity {alert.severity.value}).\nEvidence:\n" + "\n".join(
                 f"- {e}" for e in alert.evidence
             )
         else:
-            head = (
-                state.get("request")
-                or "Contrôle ponctuel : vérifie que la machine fonctionne normalement et détecte tout problème naissant."
-            )
+            head = state.get("request") or "Spot check: verify that the machine works normally and detect any emerging problem."
         opening = (
-            f"{head}\n\nMachine : {toolbox.connector.name}\n"
-            f"État : {toolbox.execute('get_status', {})}\n\n"
-            f"Codes d'erreur (2 dernières minutes) :\n{toolbox.execute('get_recent_faults', {'seconds': 120})}\n\n"
-            "Journal, avertissements et erreurs (2 dernières minutes) :\n"
-            f"{toolbox.execute('get_recent_logs', {'seconds': 120, 'min_level': 'WARNING'})}\n\n"
-            f"Références disponibles :\n{toolbox.execute('list_baselines', {})}"
+            f"{head}\n\nMachine: {toolbox.connector.name}\n"
+            f"State: {toolbox.execute('get_status', {})}\n\n"
+            f"Fault codes (last 2 minutes):\n{toolbox.execute('get_recent_faults', {'seconds': 120})}\n\n"
+            f"Log, warnings and errors (last 2 minutes):\n{toolbox.execute('get_recent_logs', {'seconds': 120, 'min_level': 'WARNING'})}"
         )
         messages: list[dict[str, Any]] = [{"role": "user", "content": opening}]
-        log.info("enquête lancée (%s)", "alerte : " + alert.reason if alert else state.get("request") or "contrôle ponctuel")
+        log.info("investigation started (%s)", "alert: " + alert.reason if alert else state.get("request") or "spot check")
 
         for turn in range(1, MAX_TURNS + 1):
             response = llm.create(system=SYSTEM_PROMPT, messages=messages, tools=tools)
@@ -158,15 +158,15 @@ def build_graph(
                 elif block.type == "text" and block.text.strip():
                     hmi.say(block.text)
             if response.stop_reason == "refusal":
-                log.error("requête déclinée par le modèle au tour %d", turn)
-                return {"turns": turn, "error": "requête déclinée par le modèle", "report": None}
+                log.error("request declined by the model at turn %d", turn)
+                return {"turns": turn, "error": "request declined by the model", "report": None}
 
             uses = [b for b in response.content if b.type == "tool_use"]
             if not uses:
-                # L'agent a répondu sans outil ni rapport (fin de tour ou limite de tokens) :
-                # on lui rappelle qu'il doit conclure par submit_report.
-                log.warning("tour %d sans appel d'outil (fin : %s)", turn, response.stop_reason)
-                messages.append({"role": "user", "content": "Termine l'enquête en appelant submit_report."})
+                # The agent answered without a tool or a report (end of turn or token limit):
+                # remind it that it must conclude with submit_report.
+                log.warning("turn %d without a tool call (stop: %s)", turn, response.stop_reason)
+                messages.append({"role": "user", "content": "End the investigation by calling submit_report."})
                 continue
 
             results = []
@@ -175,25 +175,27 @@ def build_graph(
                 try:
                     content = toolbox.execute(use.name, dict(use.input))
                     results.append({"type": "tool_result", "tool_use_id": use.id, "content": content})
-                except Exception as exc:  # noqa: BLE001 - l'erreur est rendue à l'agent, qui peut s'adapter
-                    log.exception("échec de l'outil %s", use.name)
-                    results.append({"type": "tool_result", "tool_use_id": use.id, "content": f"erreur : {exc}", "is_error": True})
+                except Exception as exc:  # noqa: BLE001 - the error is given back to the agent, which can adapt
+                    log.exception("tool %s failed", use.name)
+                    results.append({"type": "tool_result", "tool_use_id": use.id, "content": f"error: {exc}", "is_error": True})
             messages.append({"role": "user", "content": results})
             if toolbox.report is not None:
-                log.info("enquête terminée en %d tour(s)", turn)
+                log.info("investigation finished in %d turn(s)", turn)
                 return {"turns": turn, "report": toolbox.report, "error": None}
 
-        log.error("enquête arrêtée après %d tours sans rapport", MAX_TURNS)
-        return {"turns": MAX_TURNS, "report": None, "error": "nombre maximal de tours atteint sans rapport"}
+        log.error("investigation stopped after %d turns without a report", MAX_TURNS)
+        return {"turns": MAX_TURNS, "report": None, "error": "maximum number of turns reached without a report"}
 
     def report(state: State) -> State:
-        """Sauvegarde le rapport (avec l'alerte, la demande et les enregistrements) et l'affiche."""
+        """Save the report (with the alert, the request and the recordings) and show it."""
         reports_dir.mkdir(parents=True, exist_ok=True)
         alert = state.get("alert")
         payload = {
             "machine": toolbox.connector.name,
             "mode": state.get("mode"),
-            "alert": alert.model_dump(mode="json") if alert else None,
+            "alert": {"reason": alert.reason, "severity": alert.severity.value, "evidence": alert.evidence, "t": alert.t}
+            if alert
+            else None,
             "request": state.get("request"),
             "report": state.get("report"),
             "error": state.get("error"),
@@ -202,7 +204,7 @@ def build_graph(
         }
         path = reports_dir / f"{time.strftime('%Y%m%d-%H%M%S')}.json"
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
-        log.info("rapport sauvegardé : %s", path)
+        log.info("report saved: %s", path)
         hmi.report(state.get("report"), state.get("error"), path)
         return {"report_path": str(path)}
 
@@ -217,3 +219,33 @@ def build_graph(
     g.add_edge("investigate", "report")
     g.add_edge("report", END)
     return g.compile()
+
+
+def run_check(toolbox: Toolbox, llm: LLM, hmi: CLI, reports_dir: Path, request: str | None = None) -> State:
+    """Run a spot check, or an investigation of a specific request from the operator.
+
+    Returns:
+        The final state of the graph (`report`, `report_path`, `error`…).
+    """
+    graph = build_graph(toolbox, llm, hmi, events=None, reports_dir=reports_dir)
+    return graph.invoke({"mode": "check", "request": request, "alert": None})
+
+
+def run_loop(toolbox: Toolbox, llm: LLM, hmi: CLI, reports_dir: Path) -> None:
+    """Watch the machine and investigate every anomaly the operator accepts, until Ctrl+C.
+
+    After each investigation, the events received meanwhile are dropped: they were mostly
+    caused by the agent's own tests, and the agent has already seen them in its recordings.
+    """
+    events = toolbox.recorder.subscribe()
+    graph = build_graph(toolbox, llm, hmi, events=events, reports_dir=reports_dir)
+    hmi.say("Monitoring (log and fault codes). Ctrl+C to stop.")
+    handled = 0
+    while True:
+        graph.invoke({"mode": "loop"})
+        dropped = 0
+        while not events.empty():
+            events.get_nowait()
+            dropped += 1
+        handled += 1
+        log.info("incident %d handled, %d event(s) dropped, monitoring resumes", handled, dropped)

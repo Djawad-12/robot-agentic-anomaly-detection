@@ -1,43 +1,43 @@
-# Scénarios de pannes pour les benchmarks.
+# Fault scenarios for the benchmarks.
 #
-#   fault     : panne de tools/fault_injection/inject.py
-#   mode      : loop  -> l'agent est réveillé par une alerte (journal ou code d'erreur)
-#               check -> contrôle ponctuel lancé après l'injection (panne silencieuse)
-#   expected  : la bonne réponse, pour la notation
-#     cause    : description de la cause racine attendue
-#     keywords : au moins un mot de chaque groupe doit apparaître dans la cause racine du rapport
+#   fault     : fault of tools/fault_injection/inject.py
+#   mode      : loop  -> the agent is woken up by an alert (log or fault code)
+#               check -> spot check started after the injection (silent fault)
+#   expected  : the right answer, for grading
+#     cause    : description of the expected root cause (also given to the Claude judge)
+#     keywords : at least one word of each group must appear in the report's root cause
 
 - id: payload-2kg
   fault: wrong_payload
   mode: check
   expected:
-    cause: La charge utile déclarée (2 kg) ne correspond pas à l'outil réellement monté (vide).
-    keywords: [[charge, payload, masse], [déclar, configur, réglage]]
+    cause: The declared payload (2 kg) does not match the tool actually mounted (empty).
+    keywords: [[payload, load, mass], [declared, configur, setting]]
 
 - id: urscript-syntax
   fault: script_error
   mode: loop
   expected:
-    cause: Le programme URScript envoyé au contrôleur contient une erreur de syntaxe.
-    keywords: [[syntaxe, syntax, script, programme]]
+    cause: The URScript program sent to the controller contains a syntax error.
+    keywords: [[syntax, script, program]]
 
 - id: protective-stop
   fault: protective_stop
   mode: loop
   expected:
-    cause: Arrêt de protection déclenché par le programme (protective_stop), sans défaut mécanique.
-    keywords: [[protection, protective, C209]]
+    cause: Protective stop triggered by the program (protective_stop), without any mechanical defect.
+    keywords: [[protective, C209]]
 
 - id: controller-crash
   fault: controller_crash
   mode: check
   expected:
-    cause: Le processus du contrôleur (URControl) s'est arrêté ; plus aucune communication avec le robot.
-    keywords: [[contrôleur, controller, URControl, processus], [arrêt, crash, communication, injoignable, plus de réponse]]
+    cause: The controller process (URControl) stopped; there is no more communication with the robot.
+    keywords: [[controller, URControl, process], [stop, crash, communication, unreachable, no response]]
 
 - id: controller-freeze
   fault: freeze
   mode: check
   expected:
-    cause: Le contrôleur a cessé de répondre pendant quelques secondes (gel, perte de communication), puis a repris.
-    keywords: [[communication, gel, interruption, coupure, perte, figé]]
+    cause: The controller stopped answering for a few seconds (freeze, communication loss), then resumed.
+    keywords: [[communication, freeze, interruption, cut, loss, froze]]

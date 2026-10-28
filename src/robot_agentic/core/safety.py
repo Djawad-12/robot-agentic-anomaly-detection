@@ -1,10 +1,10 @@
-"""Garde-fous : toute action demandée par l'agent passe par ici avant d'atteindre la machine.
+"""Safety checks: every action requested by the agent goes through here before reaching the machine.
 
-Même si le LLM se trompe, la machine reste dans un cadre fixé à l'avance :
-- les arguments numériques sont bornés par le connecteur (`ToolSpec.limits`) ; une valeur
-  hors bornes est refusée et l'agent en reçoit la raison ;
-- toute action qui met la machine en mouvement demande l'accord de l'opérateur, et son code
-  PIN s'il est configuré.
+Even if the LLM is wrong, the machine stays within limits fixed in advance:
+- every argument is required and bounded by the connector (`ToolSpec.params`); a missing or
+  out-of-range value is refused and the agent is told why;
+- every action that moves the machine needs the operator's approval, each time, plus their
+  PIN code (asked once per investigation) if one is configured.
 """
 
 from __future__ import annotations
@@ -20,57 +20,57 @@ log = logging.getLogger(__name__)
 
 
 class SafetyRefusal(Exception):
-    """Action refusée par les garde-fous ; le message est renvoyé tel quel à l'agent."""
+    """Action refused by the safety checks; the message is sent back to the agent as is."""
 
 
 @dataclass
 class SafetyPolicy:
-    """Décide si une action peut être exécutée.
+    """Decides whether an action may run.
 
     Attributes:
-        ask_operator: pose une question oui/non à l'opérateur (fournie par l'IHM).
-        pin: code demandé avant le premier mouvement d'une enquête ; None pour s'en passer.
-        ask_pin: demande le code à l'opérateur.
-        approve_once: True : un accord vaut pour toute l'enquête ; False : un accord par mouvement.
+        ask_operator: asks the operator a yes/no question (provided by the terminal interface).
+        pin: code asked before the first movement of an investigation; empty for none.
+        ask_pin: asks the operator for the code.
     """
 
     ask_operator: Callable[[str], bool]
-    pin: str | None = None
+    pin: str = ""
     ask_pin: Callable[[], str] | None = None
-    approve_once: bool = True
-    _approved: bool = field(default=False, init=False)
+    _pin_given: bool = field(default=False, init=False)
 
     def reset(self) -> None:
-        """Oublie l'accord donné : à appeler au début de chaque enquête."""
-        self._approved = False
+        """Forget that the PIN was given: call at the start of each investigation."""
+        self._pin_given = False
 
     def check(self, spec: ToolSpec, args: dict[str, Any]) -> None:
-        """Vérifie les bornes, puis obtient l'accord de l'opérateur si l'action bouge la machine.
+        """Check the arguments, then get the operator's approval if the action moves the machine.
 
         Raises:
-            SafetyRefusal: si un argument sort de ses bornes, si l'opérateur refuse ou si le
-                code PIN est faux. Rien n'a alors été envoyé à la machine.
+            SafetyRefusal: if an argument is missing or out of range, if the operator refuses,
+                or if the PIN is wrong. Nothing has then been sent to the machine.
         """
-        for key, (lo, hi) in spec.limits.items():
+        for key, p in spec.params.items():
             if key not in args:
-                continue
+                log.warning("refused %s: missing argument %s", spec.name, key)
+                raise SafetyRefusal(f"{spec.name}: argument {key} is required")
             try:
                 value = float(args[key])
             except (TypeError, ValueError) as exc:
-                log.warning("refus de %s : %s n'est pas un nombre (%r)", spec.name, key, args[key])
-                raise SafetyRefusal(f"{spec.name} : {key} doit être un nombre") from exc
-            if not lo <= value <= hi:
-                log.warning("refus de %s : %s=%s hors de [%s, %s]", spec.name, key, value, lo, hi)
-                raise SafetyRefusal(f"{spec.name} : {key}={value} hors des limites autorisées [{lo}, {hi}]")
+                log.warning("refused %s: %s is not a number (%r)", spec.name, key, args[key])
+                raise SafetyRefusal(f"{spec.name}: {key} must be a number") from exc
+            if not p.low <= value <= p.high:
+                log.warning("refused %s: %s=%s outside [%s, %s]", spec.name, key, value, p.low, p.high)
+                raise SafetyRefusal(f"{spec.name}: {key}={value} outside the allowed range [{p.low}, {p.high}]")
 
-        if not spec.moves_machine or (self.approve_once and self._approved):
+        if not spec.moves_machine:
             return
         described = ", ".join(f"{k}={v}" for k, v in args.items())
-        if not self.ask_operator(f"L'agent veut lancer {spec.name}({described}). Autoriser ?"):
-            log.warning("refus de %s(%s) par l'opérateur", spec.name, described)
-            raise SafetyRefusal("l'opérateur a refusé ce test ; propose une autre piste ou conclus avec les données disponibles")
-        if self.pin and not self._approved and (self.ask_pin is None or self.ask_pin() != self.pin):
-            log.warning("refus de %s : code PIN incorrect", spec.name)
-            raise SafetyRefusal("code PIN incorrect ; aucun mouvement n'a été effectué")
-        self._approved = True
-        log.info("mouvement autorisé : %s(%s)", spec.name, described)
+        if not self.ask_operator(f"The agent wants to run {spec.name}({described}). Allow?"):
+            log.warning("operator refused %s(%s)", spec.name, described)
+            raise SafetyRefusal("the operator refused this test; try another lead or conclude with the data you have")
+        if self.pin and not self._pin_given:
+            if self.ask_pin is None or self.ask_pin() != self.pin:
+                log.warning("refused %s: wrong PIN", spec.name)
+                raise SafetyRefusal("wrong PIN; the machine did not move")
+            self._pin_given = True
+        log.info("movement allowed: %s(%s)", spec.name, described)

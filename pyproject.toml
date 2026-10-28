@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "robot-agentic"
-version = "0.1.0"
-description = "Agent de diagnostic : remonte à la cause racine d'une panne à partir des signaux, journaux, codes d'erreur et documentation d'une machine."
+version = "0.2.0"
+description = "Software anomaly detection agent: finds the root cause of a robot failure from its signals, logs, fault codes and documentation."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,7 +13,6 @@ dependencies = [
   "langgraph>=0.6",
   "numpy>=2.1",
   "matplotlib>=3.9",
-  "pydantic>=2.8",
   "pypdf>=5.0",
   "python-dotenv>=1.0",
   "pyyaml>=6.0",
@@ -40,9 +39,9 @@ line-length = 140
 target-version = "py311"
 
 [tool.ruff.lint]
-# ANN : annotations obligatoires ; D : docstrings obligatoires (voir CONTRIBUTING.md).
+# ANN: type annotations required; D: docstrings required (see CONTRIBUTING.md).
 select = ["E", "F", "W", "I", "B", "UP", "ANN", "D"]
-# ANN401 : `Any` reste permis pour les données JSON réellement dynamiques.
+# ANN401: `Any` stays allowed for truly dynamic JSON data.
 ignore = ["ANN401"]
 
 [tool.ruff.lint.pydocstyle]

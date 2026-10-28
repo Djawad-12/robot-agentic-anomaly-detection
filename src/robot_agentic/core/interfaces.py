@@ -1,8 +1,7 @@
-"""Le contrat que chaque machine doit respecter.
+"""The contract every machine must respect.
 
-L'agent ne parle qu'à un `Connector`. Brancher une nouvelle machine (URSim, bras RoArm, pince
-MotorScope…) revient à écrire une classe qui implémente ces méthodes : le reste du projet ne
-change pas.
+The agent only talks to a `Connector`. Plugging in a new machine means writing a class that
+implements these methods: the rest of the project does not change.
 """
 
 from __future__ import annotations
@@ -15,48 +14,48 @@ from .events import FaultCode, LogLine, Sample, ToolSpec
 
 
 class Connector(ABC):
-    """Accès aux quatre sources de données d'une machine, et aux actions possibles sur elle.
+    """Access to the four data sources of a machine, and to the actions possible on it.
 
-    Les trois flux (`signals`, `logs`, `faults`) sont des itérateurs bloquants, lus chacun
-    dans son propre fil par `core.recorder.Recorder`. Un flux qui perd sa source lève une
-    exception (ConnectionError en général) : le `Recorder` le relance.
+    The three streams (`signals`, `logs`, `faults`) are blocking iterators, each read in its
+    own thread by `core.recorder.Recorder`. A stream that loses its source raises an exception
+    (usually ConnectionError): the `Recorder` restarts it.
     """
 
-    #: Nom court de la machine, repris dans les rapports et les fichiers de référence.
+    #: Short machine name, used in reports and recording files.
     name: str = "machine"
 
     @abstractmethod
     def signals(self) -> Iterator[Sample]:
-        """Flux temps réel des mesures (positions, vitesses, courants, couples, températures)."""
+        """Live stream of measurements (positions, speeds, currents, torques, temperatures)."""
 
     @abstractmethod
     def logs(self) -> Iterator[LogLine]:
-        """Flux des nouvelles lignes du journal, à partir de maintenant."""
+        """Stream of new log lines, from now on."""
 
     @abstractmethod
     def faults(self) -> Iterator[FaultCode]:
-        """Flux des codes d'erreur émis par le contrôleur, à partir de maintenant."""
+        """Stream of new fault codes raised by the controller, from now on."""
 
     @abstractmethod
     def docs(self) -> list[str]:
-        """Chemins des documents de la machine (manuels PDF, pages HTML enregistrées)."""
+        """Paths of the machine's documents (PDF manuals, saved HTML pages)."""
 
     @abstractmethod
     def tools(self) -> list[ToolSpec]:
-        """Actions propres à cette machine, proposées à l'agent."""
+        """Actions specific to this machine, offered to the agent."""
 
     @abstractmethod
     def call_tool(self, name: str, args: dict[str, Any]) -> str:
-        """Exécute une action déjà validée par `core.safety`. Renvoie un compte rendu court."""
+        """Run an action already validated by `core.safety`. Returns a short summary."""
 
     @abstractmethod
     def stop(self) -> None:
-        """Arrête immédiatement tout mouvement en cours."""
+        """Stop any movement in progress immediately."""
 
     @abstractmethod
-    def health(self) -> dict[str, Any]:
-        """Vérifie que la machine répond. Renvoie {"ok": bool, ...détails}."""
+    def health(self) -> list[tuple[bool, str]]:
+        """Check that the machine answers: one (ok, description) pair per check."""
 
     def snapshot(self) -> dict[str, Any]:
-        """État courant résumé (mode, sécurité, programme…). Facultatif."""
+        """Current state in short (mode, safety, program…). Optional."""
         return {}

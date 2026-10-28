@@ -1,10 +1,9 @@
-"""Point d'entrée : `robot-agentic <commande>` (ou `python -m robot_agentic <commande>`).
+"""Entry point: `robot-agentic <command>` (or `python -m robot_agentic <command>`).
 
-Commandes :
-  health                 vérifie la machine et les quatre flux
-  baseline [--standard]  enregistre les références de bon fonctionnement
-  check [demande]        contrôle ponctuel (ou enquête sur une demande précise)
-  loop                   surveillance continue, enquête à chaque anomalie
+Commands:
+  health [--api]   checks the machine, its three live streams and (with --api) the Claude API
+  check [request]  spot check, or an investigation of a specific request
+  loop             continuous monitoring, an investigation at each anomaly
 """
 
 from __future__ import annotations
@@ -14,25 +13,28 @@ import logging
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any
 
+import anthropic
+
+from .agent.graph import run_check, run_loop
 from .agent.llm import ClaudeClient
-from .agent.modes import run_check, run_loop
 from .agent.tools import Toolbox
 from .config import Settings, load_settings, setup_logging
-from .connectors import load
+from .connectors.fake import FakeConnector
+from .connectors.ursim import URSimConnector
+from .core.interfaces import Connector
 from .core.recorder import Recorder
 from .core.safety import SafetyPolicy
-from .hmi.cli import CLI
+from .hmi import CLI
 
 log = logging.getLogger(__name__)
 
 
 @dataclass
 class Runtime:
-    """Tout ce qu'il faut pour travailler sur une machine : réglages, outils et interface.
+    """Everything needed to work on a machine: settings, tools and interface.
 
-    Le connecteur, l'enregistreur et les garde-fous sont déjà branchés dans `toolbox`.
+    The connector, the recorder and the safety checks are already plugged into `toolbox`.
     """
 
     settings: Settings
@@ -41,88 +43,97 @@ class Runtime:
 
 
 def build_runtime(auto_approve: bool = False, settings: Settings | None = None) -> Runtime:
-    """Assemble connecteur, enregistreur, garde-fous et outils, et démarre la lecture des flux.
+    """Assemble connector, recorder, safety checks and tools, and start reading the streams.
 
-    Utilisé par la ligne de commande et par les benchmarks.
+    Used by the command line and by the benchmarks.
 
     Args:
-        auto_approve: accepte automatiquement les tests (simulateur uniquement).
-        settings: réglages ; lus dans l'environnement si None.
+        auto_approve: approve every test automatically (simulator only).
+        settings: settings; read from the environment if None.
+
+    Raises:
+        ValueError: if `settings.connector` is neither "ursim" nor "fake".
     """
     settings = settings or load_settings()
     setup_logging(settings)
+    connector: Connector
+    if settings.connector == "ursim":
+        connector = URSimConnector(settings.robot_host, settings.ursim_container, settings.manuals_dir / "ursim")
+    elif settings.connector == "fake":
+        connector = FakeConnector()
+    else:
+        raise ValueError(f"unknown connector: {settings.connector}")
     hmi = CLI(auto_approve=auto_approve)
-    connector = load(settings)
     recorder = Recorder(connector, settings.recordings_dir).start()
     safety = SafetyPolicy(ask_operator=hmi.confirm, pin=settings.operator_pin, ask_pin=hmi.ask_pin)
-    toolbox = Toolbox(
-        connector, recorder, safety, settings.baselines_dir, settings.data_dir / "docs_index", settings.recording_token_budget
-    )
-    log.info("machine %s, modèle %s, accord automatique : %s", connector.name, settings.model, auto_approve)
-    time.sleep(1.5)  # laisse les flux se remplir avant la première lecture
+    toolbox = Toolbox(connector, recorder, safety, settings.data_dir / "docs_index", settings.recording_token_budget)
+    log.info("machine %s, model %s, automatic approval: %s", connector.name, settings.claude_model, auto_approve)
+    time.sleep(1.5)  # let the streams fill before the first reading
     return Runtime(settings, toolbox, hmi)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Lit la ligne de commande et exécute la commande demandée.
+def health(rt: Runtime, check_api: bool) -> bool:
+    """Check the machine, the three streams read by the recorder, and optionally the Claude API.
 
     Returns:
-        Le code de sortie : 0 en cas de succès, 1 si la machine n'est pas prête ou si
-        l'opérateur annule.
+        True if every check passed.
     """
-    parser = argparse.ArgumentParser(prog="robot-agentic", description="Agent de diagnostic Robot Agentic")
-    parser.add_argument("--yes", action="store_true", help="accepte automatiquement les tests (simulation uniquement)")
+    tb = rt.toolbox
+    results = tb.connector.health()
+    time.sleep(1.5)
+    rec = tb.recorder.latest(2.5)
+    results.append((rec.rate_hz > 10, f"signal stream: {rec.rate_hz:.0f} Hz, {len(rec.channels)} channels"))
+    for stream in ("logs", "faults"):
+        results.append((stream not in tb.recorder.errors, f"{stream} stream: {tb.recorder.errors.get(stream, 'running')}"))
+    if check_api:
+        try:
+            model = anthropic.Anthropic().models.retrieve(rt.settings.claude_model)
+            results.append((True, f"Claude API: access to model {model.id}"))
+        except anthropic.AuthenticationError:
+            results.append((False, "Claude API: missing or invalid key (ANTHROPIC_API_KEY or `ant auth login`)"))
+        except anthropic.APIConnectionError as exc:
+            results.append((False, f"Claude API: unreachable ({exc})"))
+        except anthropic.APIStatusError as exc:
+            results.append((False, f"Claude API: error {exc.status_code}"))
+    rt.hmi.checklist(results)
+    return all(ok for ok, _ in results)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Read the command line and run the requested command.
+
+    Returns:
+        The exit code: 0 on success, 1 if a health check failed.
+    """
+    parser = argparse.ArgumentParser(prog="robot-agentic", description="Robot Agentic diagnostic agent")
+    parser.add_argument("--yes", action="store_true", help="approve every test automatically (simulator only)")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("health", help="vérifie la machine et les flux")
-    b = sub.add_parser("baseline", help="enregistre des références de bon fonctionnement")
-    b.add_argument("--standard", action="store_true", help="un aller-retour de 5° par articulation, puis le test global")
-    b.add_argument("--test", nargs="+", metavar="NOM [clé=valeur…]", help="un test précis, ex. joint_test joint=1 delta_deg=5")
-    c = sub.add_parser("check", help="contrôle ponctuel")
-    c.add_argument("request", nargs="*", help="demande précise (facultatif)")
-    sub.add_parser("loop", help="surveillance continue")
+    h = sub.add_parser("health", help="check the machine and the streams")
+    h.add_argument("--api", action="store_true", help="also check access to the Claude API (free read request)")
+    c = sub.add_parser("check", help="spot check")
+    c.add_argument("request", nargs="*", help="specific request (optional)")
+    sub.add_parser("loop", help="continuous monitoring")
     args = parser.parse_args(argv)
 
     rt = build_runtime(auto_approve=args.yes)
-    tb, hmi, st = rt.toolbox, rt.hmi, rt.settings
-
     if args.command == "health":
-        health = tb.connector.health()
-        health["flux"] = {"âge du dernier signal (s)": tb.recorder.last_sample_age(), "erreurs": tb.recorder.errors}
-        hmi.info(health)
-        return 0 if health.get("ok") else 1
+        return 0 if health(rt, args.api) else 1
 
-    if args.command == "baseline":
-        tests: list[tuple[str, dict[str, Any]]] = []
-        if args.standard:
-            if "joint_test" in tb.machine_tools:
-                tests += [("joint_test", {"joint": j, "delta_deg": 5}) for j in range(6)]
-            if "overall_test" in tb.machine_tools:
-                tests.append(("overall_test", {"amplitude_deg": 5}))
-        elif args.test:
-            name, *pairs = args.test
-            tests = [(name, {k: float(v) if "." in v else int(v) for k, v in (p.split("=", 1) for p in pairs)})]
-        else:
-            parser.error("préciser --standard ou --test")
-        if not hmi.confirm(f"La machine est-elle en bon état ? {len(tests)} test(s) vont servir de référence."):
-            return 1
-        for name, targs in tests:
-            baseline = tb.capture_baseline(name, targs)
-            hmi.say(f"référence enregistrée : {baseline.test} ({baseline.recording_id})")
-        return 0
-
-    llm = ClaudeClient(model=st.model, log_path=st.llm_log)
+    st = rt.settings
+    llm = ClaudeClient(model=st.claude_model, log_path=st.llm_log)
     try:
         if args.command == "check":
-            run_check(tb, llm, hmi, st.reports_dir, " ".join(args.request) or None)
+            run_check(rt.toolbox, llm, rt.hmi, st.reports_dir, " ".join(args.request) or None)
         else:
-            run_loop(tb, llm, hmi, st.reports_dir)
+            run_loop(rt.toolbox, llm, rt.hmi, st.reports_dir)
     except KeyboardInterrupt:
-        log.warning("interruption par l'opérateur")
-        tb.connector.stop()
-        hmi.say("Arrêt demandé.")
+        log.warning("interrupted by the operator")
+        rt.toolbox.connector.stop()
+        rt.hmi.say("Stop requested.")
     u = llm.usage
-    tokens_in = u.input_tokens + u.cache_read_tokens
-    hmi.say(f"Appels à Claude : {u.calls}, {tokens_in} tokens en entrée, {u.output_tokens} en sortie, ≈ {u.cost_usd:.3f} $")
+    rt.hmi.say(
+        f"Claude calls: {u.calls}, {u.input_tokens + u.cache_read_tokens} input tokens, {u.output_tokens} output, ≈ ${u.cost_usd:.3f}"
+    )
     return 0
 
 
