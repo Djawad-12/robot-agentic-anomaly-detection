@@ -99,23 +99,28 @@ class URSimFaults:
     def wait_ready(self, timeout: float = 120.0) -> str:
         """Wait until the controller answers, then bring the robot back to RUNNING.
 
+        After a container restart the Dashboard answers before the controller is ready (empty
+        answer, then NO_CONTROLLER): powering on is retried until the robot is RUNNING.
+
         Returns:
-            The robot mode (RUNNING if everything is fine).
+            "RUNNING".
 
         Raises:
-            TimeoutError: if the controller does not answer in time.
+            TimeoutError: if the robot is not RUNNING in time.
         """
         deadline = time.time() + timeout
+        mode = "no answer"
         while time.time() < deadline:
             try:
-                Dashboard(self.host, timeout=2).robot_mode()
+                mode = Dashboard(self.host, timeout=2).robot_mode()
+                if mode not in ("", "NO_CONTROLLER", "BOOTING"):
+                    mode = Dashboard(self.host).power_on_and_release(attempts=10)
+                    if mode == "RUNNING":
+                        return mode
             except OSError:
-                time.sleep(2)
-                continue
-            # The Dashboard answers before the controller accepts to power on.
-            time.sleep(3)
-            return Dashboard(self.host).power_on_and_release()
-        raise TimeoutError("the controller does not answer")
+                pass
+            time.sleep(2)
+        raise TimeoutError(f"the robot is not RUNNING (last mode: {mode})")
 
 
 def main() -> None:

@@ -75,11 +75,13 @@ class EventWatcher:
 def stream_gaps(rec: Recording, max_gap_s: float = 0.1) -> list[tuple[float, float]]:
     """Holes longer than `max_gap_s` seconds in the signal stream (communication loss).
 
+    The start and the end of the window count too: a stream that stops for good (controller
+    crash) leaves a hole between its last sample and the end of the recording.
+
     Returns:
         For each hole: (start relative to the window, duration), in seconds. A recording
         without any sample counts as one hole covering the whole window.
     """
-    if len(rec.t) < 2:
-        return [(0.0, rec.duration)] if rec.duration > max_gap_s else []
-    dt = np.diff(rec.t)
-    return [(float(rec.t[i] - rec.t0), float(dt[i])) for i in np.flatnonzero(dt > max_gap_s)]
+    edges = np.concatenate([[rec.t0], rec.t, [rec.t1]])
+    dt = np.diff(edges)
+    return [(float(edges[i] - rec.t0), float(dt[i])) for i in np.flatnonzero(dt > max_gap_s)]

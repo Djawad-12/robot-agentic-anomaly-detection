@@ -139,12 +139,20 @@ class Toolbox:
         log.info("tool %s %s", name, json.dumps(args, ensure_ascii=False))
 
         if name in self.machine_tools:
+            spec = self.machine_tools[name]
             try:
-                self.safety.check(self.machine_tools[name], args)
+                self.safety.check(spec, args)
             except SafetyRefusal as exc:
                 return f"REFUSED: {exc}"
-            label = f"{name}({', '.join(f'{k}={v}' for k, v in args.items())})"
-            rec, outcome = self.recorder.record(lambda: self.connector.call_tool(name, args), label=label)
+            if spec.moves_machine:
+                label = f"{name}({', '.join(f'{k}={v}' for k, v in args.items())})"
+                rec, outcome = self.recorder.record(lambda: self.connector.call_tool(name, args), label=label)
+            else:
+                result = self.connector.call_tool(name, args)
+                if not isinstance(result, Recording):
+                    return result
+                rec, outcome = result, result.label
+                rec.save(self.recorder.directory)
             self.used_recordings.append(rec.id)
             return self.describe_test(rec, outcome)
 
@@ -196,7 +204,7 @@ class Toolbox:
         raise ValueError(f"unknown tool: {name}")
 
     def describe_test(self, rec: Recording, outcome: str) -> list[dict[str, Any]]:
-        """What the agent receives after a test.
+        """What the agent receives after a test (or when it opens a black box).
 
         Three blocks: (1) a text with the outcome, the stream cuts, the fault codes and the log
         warnings during the test; (2) a plot of the channels that moved the most; (3) the full

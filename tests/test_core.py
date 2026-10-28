@@ -80,6 +80,14 @@ def test_recording_save_and_load(tmp_path: Path) -> None:
     assert back.channels["a"].tolist() == [1.0, 2.0] and back.logs[0].level is Level.ERROR
 
 
+def test_stream_that_stops_for_good_is_a_cut() -> None:
+    """A stream that stops before the end of the window (controller crash) shows as a cut at the end."""
+    t = np.arange(0.0, 2.0, 0.002)
+    rec = Recording("r", "crash", "m", 0.0, 15.0, t, {"a": np.zeros_like(t)})
+    gaps = checks.stream_gaps(rec)
+    assert len(gaps) == 1 and gaps[0][0] > 1.99 and gaps[0][1] > 12.9
+
+
 def test_settings_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each setting is read from the variable of the same name in upper case, converted to its type."""
     monkeypatch.setenv("RECORDING_TOKEN_BUDGET", "1234")

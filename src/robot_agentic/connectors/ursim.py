@@ -15,19 +15,26 @@ Every action that moves the robot stays small and slow; its bounds are declared 
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
 import socket
 import struct
 import subprocess
+import tempfile
 import time
+import zipfile
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from ..core.events import FaultCode, Level, LogLine, Param, Sample, ToolSpec
 from ..core.interfaces import Connector
+from ..core.recorder import Recording
 
 log = logging.getLogger(__name__)
 
@@ -76,8 +83,15 @@ MESSAGE_SOURCES = {
     115: "JOINT5", 120: "TOOL",
 }  # fmt: skip
 
-# Controller log files inside the container.
-LOG_FILES = {"/ursim/URControl.log": "controller", "/ursim/polyscope.log": "polyscope"}
+# Log files inside the container: the controller's, PolyScope's (the robot's user interface)
+# and the teach pendant's event list (what a technician sees on the robot's tablet).
+LOG_FILES = ["/ursim/URControl.log", "/ursim/polyscope.log", "/ursim/log_history.txt"]
+# Each file has its own line format, which tells where a line comes from.
+_SOURCES = [
+    ("controller", re.compile(r"\d{4}-\d{2}-\d{2}_\d")),
+    ("polyscope", re.compile(r"\d{4}-\d{2}-\d{2} \d")),
+    ("pendant", re.compile(r"\d+\.\d+ :: ")),
+]
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _LEVEL = re.compile(r"\b(DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL)\b\s*-\s*(.*)")
 # Client connections opening and closing (ours included): background noise, demoted to DEBUG
@@ -148,19 +162,34 @@ def parse_primary(packet: bytes, t: float) -> FaultCode | None:
     return None
 
 
-def parse_log_line(line: str, source: str) -> LogLine | None:
-    """Translate one controller log line; None for an empty line or a `tail` header.
+def parse_log_line(line: str, previous: LogLine | None = None) -> LogLine | None:
+    """Translate one line of the three log files; None for an empty line or a `tail` header.
 
-    Colour codes (PolyScope writes some at the start of its lines) are removed first. A line
-    without a recognisable level is kept at INFO.
-
-    Formats:
+    Colour codes (PolyScope writes some) and NUL characters (the pendant file has some) are
+    removed first. The source is recognised from the line format:
         controller: `2026-10-24_14:00:54:48634 00:00:53:014 INFO    - text`
         PolyScope:  `2026-10-24 14:00:01.875 ERROR -  text {thread: …, loggerClass: …}`
+        pendant:    `3.5 :: 0000d15h09m38.868s :: 2026-10-28 22:14:02.800 :: -2 :: C209A0:6 :: null :: 2 :: title :: message :: 0`
+    A line in none of these formats continues the message above it (PolyScope writes
+    multi-line messages and Java stack traces): it keeps the source and level of `previous`.
+
+    Pendant lines are kept at INFO, or WARNING when they carry an error code other than
+    C0A0: the file does not state the severity in a documented way, and the same events
+    arrive with their real level on the Primary interface.
     """
-    line = _ANSI.sub("", line).strip()
+    line = _ANSI.sub("", line).replace("\x00", "").strip()
     if not line or line.startswith("==>"):
         return None
+    source = next((name for name, fmt in _SOURCES if fmt.match(line)), None)
+    if source is None:
+        if line.startswith("{thread:"):
+            return None
+        return LogLine(level=previous.level, source=previous.source, text=line) if previous else LogLine(text=line)
+    if source == "pendant":
+        fields = [f.strip() for f in line.split(" :: ")]
+        code = fields[4].split(":")[0] if len(fields) > 4 else ""
+        text = " ".join(f for f in [code, *fields[7:9]] if f and f != "null")
+        return LogLine(level=Level.INFO if code == "C0A0" else Level.WARNING, source=source, text=text)
     m = _LEVEL.search(line)
     if not m:
         return LogLine(source=source, text=line)
@@ -169,6 +198,84 @@ def parse_log_line(line: str, source: str) -> LogLine | None:
     if _SOCKET_NOISE.search(text):
         level = "DEBUG"
     return LogLine(level=Level(level), source=source, text=text)
+
+
+# Black boxes ("flight reports"): written by PolyScope on every controller error.
+FLIGHT_REPORTS = "/ursim/flightreports"
+# Black-box column names (without unit and joint number) that have a live-stream equivalent:
+# they get the same channel name, so that the agent compares like with like.
+_FLIGHT_NAMES = {
+    "target position": "q_target",
+    "actual position": "q_actual",
+    "actual velocity": "qd_actual",
+    "target current": "current_target",
+    "actual current": "current_actual",
+    "target moment": "torque_target",
+    "temperature": "motor_temperature",
+}
+_LINE_TIME = re.compile(r"(\d{4}-\d{2}-\d{2})[ _](\d{2}:\d{2}:\d{2})[.:](\d+)")
+
+
+def _line_time(line: str) -> float | None:
+    """Instant written at the start of a log line (local time), or None if there is none."""
+    m = _LINE_TIME.search(line[:60])
+    if not m:
+        return None
+    day, clock, fraction = m.groups()
+    return datetime.strptime(f"{day} {clock}", "%Y-%m-%d %H:%M:%S").timestamp() + float(f"0.{fraction}")
+
+
+def read_flight_report(path: Path, machine: str) -> Recording:
+    """Turn a black box (zip written by PolyScope) into a `Recording`.
+
+    The black box holds about 30 s of controller data at 500 Hz (181 columns), ending a few
+    seconds after the incident, plus the pendant and PolyScope logs. Its time column is the
+    controller's uptime: the last sample is aligned on the "Reporting Time" of the summary,
+    which is given to the second, so the time axis is right within about one second. Some
+    black boxes (e.g. after a controller crash) have no data, only logs.
+
+    Raises:
+        KeyError: if the zip is not a black box (no summary.log or metadata.json).
+    """
+    with zipfile.ZipFile(path) as z:
+        meta = json.loads(z.read("metadata.json"))
+        summary = z.read("summary.log").decode("utf-8", "replace")
+        names = z.namelist()
+        csv = z.read("files/realtimedata.csv").decode() if "files/realtimedata.csv" in names else ""
+        raw_logs = [z.read(f).decode("utf-8", "replace") for f in ("files/log_history.txt", "files/polyscope.log") if f in names]
+    found = dict(re.findall(r"^(Incident Time|Reporting Time|Current Program State|Payload \[kg\]): (.*)$", summary, re.MULTILINE))
+    reported = datetime.strptime(found["Reporting Time"].replace(" CET", "").replace(" CEST", ""), "%a %b %d %H:%M:%S %Y").timestamp()
+
+    t, channels = np.array([]), {}
+    if csv:
+        rows = csv.splitlines()
+        header = rows[0].split(",")
+        data = np.array([[float(x) if x else np.nan for x in r.split(",")] for r in rows[1:]])
+        t = data[:, 0] - data[-1, 0] + reported
+        for i, column in enumerate(header[1:], start=1):
+            name = re.sub(r"\[.*?\]", "", column).strip().lower()
+            if name in ("reserved", "sequence number"):  # unused columns, and a counter that only grows
+                continue
+            m = re.fullmatch(r"(.*) j(\d)", name)
+            base = m.group(1) if m else name
+            base = _FLIGHT_NAMES.get(base, re.sub(r"\W+", "_", base))
+            channels[f"joint_{m.group(2)}_{base}" if m else base] = data[:, i]
+
+    logs, previous = [], None
+    for text in raw_logs:
+        for raw in text.splitlines():
+            entry = parse_log_line(raw, previous)
+            if entry is not None:
+                entry.t = _line_time(raw.replace("\x00", "")) or (previous.t if previous else reported)
+                previous = entry
+                logs.append(entry)
+    t0 = float(t[0]) if len(t) else reported - 30
+    label = (
+        f"black box {path.stem}: {meta.get('reportType')}, incident {found.get('Incident Time')}, program "
+        f"{found.get('Current Program State')}, declared payload {found.get('Payload [kg]')} kg"
+        + ("" if len(t) else ", no signal data in this black box")
+    )
+    return Recording(path.stem, label, machine, t0, reported, t, channels, [x for x in logs if t0 <= x.t <= reported])
 
 
 def send_script(host: str, script: str, timeout: float = 5.0) -> None:
@@ -296,22 +403,28 @@ class URSimConnector(Connector):
                 yield parse_realtime(packet, time.time())
 
     def logs(self) -> Iterator[LogLine]:
-        """New lines of the controller and PolyScope logs.
+        """New lines of the controller, PolyScope and teach pendant logs.
 
-        `tail -q` does not say which file a line comes from: it is deduced from the date format.
+        `tail -q` does not say which file a line comes from: `parse_log_line` deduces it from
+        the line format. Killing our `docker exec` does not stop the `tail` it started inside
+        the container, so `tail` runs in the background of a shell that waits on our stdin:
+        when this program stops, its stdin closes and the shell kills `tail`.
 
         Raises:
             ConnectionError: when `tail` stops (container stopped or restarted).
         """
-        cmd = ["docker", "exec", self.container, "tail", "-n", "0", "-q", "-F", *LOG_FILES]
-        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1) as proc:
-            log.info("reading the log of container %s", self.container)
+        tail = f"tail -n 0 -q -F {' '.join(LOG_FILES)} & read _; kill $!"
+        cmd = ["docker", "exec", "-i", self.container, "sh", "-c", tail]
+        with subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace", bufsize=1
+        ) as proc:
+            log.info("reading the logs of container %s", self.container)
             assert proc.stdout is not None
+            previous = None
             for raw in proc.stdout:
-                clean = _ANSI.sub("", raw)
-                source = "polyscope" if re.match(r"\s*\d{4}-\d{2}-\d{2} \d", clean) else "controller"
-                entry = parse_log_line(clean, source)
+                entry = parse_log_line(raw, previous)
                 if entry is not None:
+                    previous = entry
                     yield entry
         raise ConnectionError(f"log reading interrupted (container {self.container} stopped?)")
 
@@ -391,21 +504,44 @@ class URSimConnector(Connector):
                 ),
                 moves_machine=True,
             ),
+            ToolSpec(
+                name="get_flight_report",
+                description=(
+                    "Opens a black box: the controller writes one on every error, with about 30 s of its own data at "
+                    "500 Hz (more channels than the live stream: target current, joint position deviation ratio, "
+                    "collision detection ratio, payload…) ending a few seconds after the incident, and its logs. "
+                    "`index` 0 = the most recent one, 1 = the one before, etc. Does not move the robot."
+                ),
+                params={"index": Param("integer", 0, 20, "0 = most recent black box")},
+            ),
         ]
 
-    def call_tool(self, name: str, args: dict[str, Any]) -> str:
+    def call_tool(self, name: str, args: dict[str, Any]) -> str | Recording:
         """Run a test (already validated by `core.safety`) and wait for the end of the movement.
 
         The movement is written in URScript and run by the controller; every test brings the
         robot back to its starting position. The end is detected on the Dashboard (`running`).
+        `get_flight_report` moves nothing: it copies a black box out of the container.
 
         Returns:
-            A short summary: test, finished or not, mode and safety status at the end.
+            For a test, a short summary: test, finished or not, mode and safety status at the
+            end. For `get_flight_report`, the black box as a recording.
 
         Raises:
             ValueError: if the tool does not exist.
             OSError: if the controller cannot be reached.
         """
+        if name == "get_flight_report":
+            reports = sorted(f for f in self._docker_ls(FLIGHT_REPORTS) if f.endswith(".zip"))
+            index = int(args["index"])
+            if index >= len(reports):
+                return f"only {len(reports)} black box(es) on the controller"
+            with tempfile.TemporaryDirectory() as tmp:
+                local = Path(tmp) / reports[-1 - index]
+                subprocess.run(
+                    ["docker", "cp", f"{self.container}:{FLIGHT_REPORTS}/{local.name}", str(local)], capture_output=True, timeout=60
+                )
+                return read_flight_report(local, self.name)
         if name == "recover_robot":
             mode = self.dashboard.power_on_and_release()
             if mode == "RUNNING" and self._payload_offset_kg:
@@ -477,6 +613,11 @@ set_target_payload(m0, cog0)
         if not finished or not normal:
             log.warning("URSim: %s", summary)
         return summary
+
+    def _docker_ls(self, folder: str) -> list[str]:
+        """Names of the files of a folder inside the container (empty if it cannot be read)."""
+        out = subprocess.run(["docker", "exec", self.container, "ls", folder], capture_output=True, text=True, timeout=30)
+        return out.stdout.split()
 
     def _restore_payload(self) -> None:
         """Remove the extra payload left declared by an interrupted `add_load`."""

@@ -8,9 +8,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .events import FaultCode, LogLine, Sample, ToolSpec
+
+if TYPE_CHECKING:
+    from .recorder import Recording
 
 
 class Connector(ABC):
@@ -45,8 +48,13 @@ class Connector(ABC):
         """Actions specific to this machine, offered to the agent."""
 
     @abstractmethod
-    def call_tool(self, name: str, args: dict[str, Any]) -> str:
-        """Run an action already validated by `core.safety`. Returns a short summary."""
+    def call_tool(self, name: str, args: dict[str, Any]) -> str | Recording:
+        """Run an action already validated by `core.safety`.
+
+        Returns:
+            A short summary, or a `Recording` for an action that reads data kept by the
+            machine itself (e.g. a black box): the agent then receives it like a test.
+        """
 
     @abstractmethod
     def stop(self) -> None:
