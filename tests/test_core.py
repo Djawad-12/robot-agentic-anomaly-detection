@@ -71,6 +71,13 @@ def test_recorder_ring_buffer_keeps_the_last_samples(fake: FakeConnector, tmp_pa
     assert np.isnan(window.channels["b"][0]) and window.channels["b"][-1] == 1.0
 
 
+def test_recorder_stop_ends_its_threads(fake: FakeConnector, tmp_path: Path) -> None:
+    """After `stop`, the signal thread has ended (the fake machine sends a sample every 10 ms)."""
+    rec = Recorder(fake, tmp_path).start()
+    rec.stop(timeout=2.0)
+    assert not rec._threads[0].is_alive()
+
+
 def test_recording_save_and_load(tmp_path: Path) -> None:
     """A saved recording reads back identically, log levels included."""
     rec = Recording(

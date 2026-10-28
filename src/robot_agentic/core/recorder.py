@@ -160,6 +160,7 @@ class Recorder:
         self._subscribers: list[queue.Queue[LogLine | FaultCode]] = []
         self._lock = threading.Lock()
         self._threads: list[threading.Thread] = []
+        self._stopping = threading.Event()
         self.errors: dict[str, str] = {}
 
     def start(self) -> Recorder:
@@ -179,10 +180,12 @@ class Recorder:
         return self
 
     def _pump(self, name: str, stream: Callable[[], Iterator[Any]], sink: Callable[[Any], None]) -> None:
-        """Loop of one reader thread: feeds `sink` with every item, and never stops."""
-        while True:
+        """Loop of one reader thread: feeds `sink` with every item, until `stop`."""
+        while not self._stopping.is_set():
             try:
                 for item in stream():
+                    if self._stopping.is_set():
+                        return  # leaving the loop closes the stream (socket, `tail`)
                     sink(item)
                     if name in self.errors:
                         log.info("stream %s restored", name)
@@ -190,8 +193,19 @@ class Recorder:
                 self.errors[name] = "stream ended"
             except Exception as exc:  # noqa: BLE001 - any network or process error must be survived
                 self.errors[name] = f"{type(exc).__name__}: {exc}"
-            log.warning("stream %s interrupted (%s), retrying in 1 s", name, self.errors[name])
-            time.sleep(1.0)
+            if not self._stopping.is_set():
+                log.warning("stream %s interrupted (%s), retrying in 1 s", name, self.errors[name])
+            self._stopping.wait(1.0)
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Stop reading the streams; each thread ends at its next item (a few ms for the signals)."""
+        self._stopping.set()
+        for th in self._threads:
+            th.join(timeout)
+        alive = [th.name for th in self._threads if th.is_alive()]
+        if alive:
+            log.warning("streams still blocked after %.0f s: %s", timeout, alive)
+        log.info("stopped reading the streams of %s", self.connector.name)
 
     def _add_sample(self, sample: Sample) -> None:
         """Write one sample into the next row of the signal buffer, adding columns for new channels."""

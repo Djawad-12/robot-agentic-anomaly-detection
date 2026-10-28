@@ -129,6 +129,7 @@ def capture(fault: str, seconds: float, out_dir: Path) -> Path:
     new_reports = sorted(set(_docker(st.ursim_container, "ls", FLIGHT_REPORTS).split()) - reports_before)
     black_boxes = [_read_flight_report(st.ursim_container, name, out_dir) for name in new_reports if name.endswith(".zip")]
 
+    recorder.stop()
     revert_started = time.time()
     try:
         faults.revert(fault)
