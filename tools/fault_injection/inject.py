@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -29,7 +30,14 @@ FAULTS = {
     "protective_stop": "Protective stop: the robot stops and refuses to move.",
     "controller_crash": "The controller process (URControl) is killed.",
     "freeze": "The whole controller is frozen for a few seconds (communication lost), then resumes.",
+    "polyscope_freeze": "The PolyScope process (user interface, Dashboard server, pendant log) is frozen; the controller keeps running.",
+    "network_cut": "The container is disconnected from the network: every interface becomes unreachable.",
+    "cpu_starvation": "The container is limited to 0.1 CPU: every process, the real-time controller included, is starved.",
+    "cpu_overload": "16 busy loops run inside the container, competing with the controller for the CPU.",
 }
+
+# Busy loop of the "cpu_overload" fault; its exact text is what `revert` looks for to stop it.
+BURN = "while :; do :; done"
 
 
 class URSimFaults:
@@ -69,14 +77,24 @@ class URSimFaults:
                 threading.Timer(
                     self.freeze_s, lambda: subprocess.run(["docker", "unpause", self.container], capture_output=True, timeout=30)
                 ).start()
+            case "polyscope_freeze":
+                # Frozen, not killed: on URSim, PolyScope ending stops the whole container.
+                subprocess.run(["docker", "exec", self.container, "pkill", "-STOP", "-f", "felix.jar"], capture_output=True, timeout=30)
+            case "network_cut":
+                subprocess.run(["docker", "network", "disconnect", "bridge", self.container], check=True, capture_output=True, timeout=30)
+            case "cpu_starvation":
+                subprocess.run(["docker", "update", "--cpus", "0.1", self.container], check=True, capture_output=True, timeout=30)
+            case "cpu_overload":
+                loops = " ".join([f"(sh -c '{BURN}' &);"] * 16)
+                subprocess.run(["docker", "exec", self.container, "sh", "-c", loops], check=True, capture_output=True, timeout=30)
             case _:
                 raise ValueError(f"unknown fault: {fault}")
 
     def revert(self, fault: str) -> None:
         """Repair a fault and bring the robot back to RUNNING.
 
-        A killed controller does not restart by itself: the container is restarted, which
-        takes about 20 seconds.
+        A killed controller does not restart by itself (nothing supervises it in the container):
+        the container is restarted, which takes about 20 seconds.
 
         Raises:
             ValueError: if the fault is unknown.
@@ -92,6 +110,17 @@ class URSimFaults:
                 subprocess.run(["docker", "restart", self.container], check=True, capture_output=True, timeout=120)
             case "freeze":
                 subprocess.run(["docker", "unpause", self.container], capture_output=True, timeout=30)
+            case "polyscope_freeze":
+                subprocess.run(["docker", "exec", self.container, "pkill", "-CONT", "-f", "felix.jar"], capture_output=True, timeout=30)
+            case "network_cut":
+                subprocess.run(["docker", "network", "connect", "bridge", self.container], capture_output=True, timeout=30)
+            case "cpu_starvation":
+                # `--cpus 0` does not remove a limit: give back every CPU of the host instead.
+                subprocess.run(
+                    ["docker", "update", "--cpus", str(os.cpu_count()), self.container], check=True, capture_output=True, timeout=30
+                )
+            case "cpu_overload":
+                subprocess.run(["docker", "exec", self.container, "pkill", "-f", BURN], capture_output=True, timeout=30)
             case _:
                 raise ValueError(f"unknown fault: {fault}")
         self.wait_ready()

@@ -32,7 +32,7 @@ from typing import Any
 import numpy as np
 
 from robot_agentic.config import load_settings, setup_logging
-from robot_agentic.connectors.ursim import URSimConnector
+from robot_agentic.connectors.ursim import URSimConnector, line_time
 from robot_agentic.core.checks import stream_gaps
 from robot_agentic.core.recorder import Recorder
 
@@ -108,7 +108,15 @@ def capture(fault: str, seconds: float, out_dir: Path) -> Path:
         # A file smaller than before was rewritten: then it is read whole.
         start = n + 1 if sizes_after[path] >= n else 1
         text = _docker(st.ursim_container, "tail", "-c", f"+{start}", path)
-        new_lines[path] = [line for line in text.splitlines() if line.strip()]
+        # Keep the lines written from 2 s before the injection on; a line without a time
+        # (continuation of a multi-line message) follows the decision of the line above.
+        kept, keep = [], True
+        for line in text.splitlines():
+            stamp = line_time(line.replace("\x00", ""))
+            keep = stamp >= injected_at - 2 if stamp is not None else keep
+            if keep and line.strip():
+                kept.append(line)
+        new_lines[path] = kept
     new_reports = sorted(set(_docker(st.ursim_container, "ls", FLIGHT_REPORTS).split()) - reports_before)
     black_boxes = [_read_flight_report(st.ursim_container, name, out_dir) for name in new_reports if name.endswith(".zip")]
 

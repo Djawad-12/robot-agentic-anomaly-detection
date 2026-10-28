@@ -216,7 +216,7 @@ _FLIGHT_NAMES = {
 _LINE_TIME = re.compile(r"(\d{4}-\d{2}-\d{2})[ _](\d{2}:\d{2}:\d{2})[.:](\d+)")
 
 
-def _line_time(line: str) -> float | None:
+def line_time(line: str) -> float | None:
     """Instant written at the start of a log line (local time), or None if there is none."""
     m = _LINE_TIME.search(line[:60])
     if not m:
@@ -266,7 +266,7 @@ def read_flight_report(path: Path, machine: str) -> Recording:
         for raw in text.splitlines():
             entry = parse_log_line(raw, previous)
             if entry is not None:
-                entry.t = _line_time(raw.replace("\x00", "")) or (previous.t if previous else reported)
+                entry.t = line_time(raw.replace("\x00", "")) or (previous.t if previous else reported)
                 previous = entry
                 logs.append(entry)
     t0 = float(t[0]) if len(t) else reported - 30
