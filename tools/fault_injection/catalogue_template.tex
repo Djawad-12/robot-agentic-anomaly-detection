@@ -60,8 +60,10 @@ marked as notes, with how they were observed.
 \end{tabular}
 
 \smallskip
-{\small ``Visible in the signals'': a stream cut, a change of robot/safety mode, or a median rate below 400\,Hz
-(500\,Hz by design). A fault with only \no\ in the first two columns cannot raise an alert from logs and fault codes
+{\small ``Visible in the signals'': a stream cut, a change of robot/safety mode, or a median rate below 450\,Hz,
+i.e.\ more than 6\,\% below the 481\,Hz received when nothing disturbs the stream (500\,Hz by design). ``Probe'':
+\texttt{disk\_full} is silent at rest, so its captures send \texttt{protective\_stop()} 2\,s after the fill to force
+the controller to write; the code and the black box then come from that protective stop. A fault with only \no\ in the first two columns cannot raise an alert from logs and fault codes
 alone: it needs the rules on the signals (summary.md, section~3).}
 
 \newpage

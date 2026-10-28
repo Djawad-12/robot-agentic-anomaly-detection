@@ -28,6 +28,7 @@ import yaml
 from robot_agentic.config import load_settings
 from robot_agentic.connectors.ursim import parse_log_line
 from robot_agentic.core.events import Level
+from robot_agentic.core.recorder import Recording
 
 from .inject import FAULTS
 
@@ -66,7 +67,18 @@ def official_codes(manual: Path) -> dict[str, tuple[str, str]]:
     return codes
 
 
-def summarise(runs: list[dict[str, Any]]) -> dict[str, Any]:
+def effective_rate(evidence: dict[str, Any], recordings: Path) -> float:
+    """Samples received per second over the whole observed window, in Hz.
+
+    The rate saved by the capture is measured between the first and the last sample: for a
+    stream that stops for good it still looks normal. Dividing by the window length shows
+    the stream as it was received.
+    """
+    rec = Recording.load(recordings / f"{evidence['signals']['recording_id']}.json.gz")
+    return len(rec.t) / rec.duration if rec.duration else 0.0
+
+
+def summarise(runs: list[dict[str, Any]], recordings: Path) -> dict[str, Any]:
     """What a fault produced across its captures, each fact with the number of runs that showed it."""
     n = len(runs)
     codes: Counter[str] = Counter()
@@ -119,7 +131,7 @@ def summarise(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "cut_runs": sum(1 for c in cuts if c),
         "cut_count": median([len(c) for c in cuts]),
         "cut_total": median([sum(d for _, d in c) for c in cuts]),
-        "rate": median([r["signals"]["rate_hz"] for r in runs]),
+        "rate": median([effective_rate(r, recordings) for r in runs]),
         "states": states.most_common(),
         "boxes": boxes.most_common(),
         "box_runs": sum(1 for r in runs if r["flight_reports"]),
@@ -128,6 +140,7 @@ def summarise(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "recovery": median([r["recovery"]["seconds"] for r in runs]),
         "recovered": sum(1 for r in runs if r["recovery"]["robot_mode"] == "RUNNING"),
         "dates": sorted(r["injected_at"] for r in runs),
+        "probe": runs[0].get("probe"),
     }
 
 
@@ -137,17 +150,18 @@ def row(fault: str, curated: dict[str, Any], s: dict[str, Any], official: dict[s
     observed = []
     for code, count, delay in s["codes"]:
         meaning = official.get(code) or official.get(re.sub(r"A\d+$", "", code))
-        observed.append(rf"\textbf{{{tex(code)}}} ({count}/{n} runs, after {delay * 1000:.0f} ms)")
+        caused = rf" --- \textit{{caused by the probe: {tex(s['probe'])}}}" if s["probe"] else ""
+        observed.append(rf"\textbf{{{tex(code)}}} ({count}/{n} runs, after {delay * 1000:.0f} ms){caused}")
         if meaning:
             observed.append(rf"\textit{{Official: {tex(meaning[0])}}}")
     if not s["codes"]:
         observed.append(r"\textbf{No fault code}")
     for (source, level, text), count in s["lines"]:
-        observed.append(rf"\textsf{{{tex(source)}}} {tex(level)} ({count}/{n}): \texttt{{{tex(text)}}}")
+        observed.append(rf"\textsf{{{tex(source or 'unknown')}}} {tex(level)} ({count}/{n}): \texttt{{{tex(text)}}}")
     if not s["lines"]:
         observed.append("No log line (besides connection noise).")
 
-    signals = [f"Rate: {s['rate']:.0f} Hz (median)."]
+    signals = [f"Samples received: {s['rate']:.0f} per second over the 17 s window (median; 500 by design)."]
     if s["cut_runs"]:
         signals.append(f"Stream cuts in {s['cut_runs']}/{n} runs: {s['cut_count']:.0f} cut(s), {s['cut_total']:.1f} s in total (median).")
     else:
@@ -189,16 +203,20 @@ def main() -> None:
     for path in sorted((settings.data_dir / "catalogue").glob("*.json")):
         evidence = json.loads(path.read_text())
         captures.setdefault(evidence["fault"], []).append(evidence)
-    summaries = {f: summarise(captures[f]) for f in FAULTS if f in captures}
+    summaries = {f: summarise(captures[f], settings.data_dir / "catalogue" / "recordings") for f in FAULTS if f in captures}
     version = next(iter(captures.values()))[0]["ursim_version"].removeprefix("VERSION=") if captures else "?"
 
     overview = []
     for f, s in summaries.items():
         has_log = any(level in ("ERROR", "WARNING", "FATAL") for (_, level, _), _ in s["lines"])
-        marks = [bool(s["codes"]), has_log, bool(s["cut_runs"] or s["states"] or s["rate"] < 400), bool(s["box_runs"])]
-        overview.append(
-            rf"\texttt{{{tex(f)}}} & {tex(curated[f]['category'])} & " + " & ".join(r"\yes" if m else r"\no" for m in marks) + r" \\"
-        )
+        marks = [bool(s["codes"]), has_log, bool(s["cut_runs"] or s["states"] or s["rate"] < 450), bool(s["box_runs"])]
+        cells = [r"\yes" if m else r"\no" for m in marks]
+        if s["probe"]:  # the code and the black box come from the probe, not from the fault itself
+            cells[0] = r"\no\ (probe: \yes)" if s["codes"] else cells[0]
+            if not s["cut_runs"] and s["rate"] >= 450:  # only the probe's change of safety mode
+                cells[2] = r"\no\ (probe: \yes)" if s["states"] else cells[2]
+            cells[3] = r"\no\ (probe: unreadable)" if s["box_runs"] else cells[3]
+        overview.append(rf"\texttt{{{tex(f)}}} & {tex(curated[f]['category'])} & " + " & ".join(cells) + r" \\")
 
     body = (HERE / "catalogue_template.tex").read_text()
     body = body.replace("@VERSION@", tex(version)).replace("@DATE@", time.strftime("%Y-%m-%d"))
