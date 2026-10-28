@@ -1,0 +1,143 @@
+# Hand-written part of the URSim fault catalogue. Everything "observed" (logs, fault codes,
+# signals, black boxes, recovery) is computed from the captures in data/catalogue/ by
+# catalogue.py: nothing observed is written here.
+#
+#   category : process, network, resource, configuration, program, safety
+#   provoke  : exact command, copied from inject.py
+#   revert   : exact command, copied from inject.py (then: robot brought back to RUNNING)
+#   sources  : official pages, each with what it supports (every link checked on 2026-10-28)
+#   notes    : facts observed outside the 5-run dataset, each saying how it was observed
+
+wrong_payload:
+  category: configuration
+  provoke: "URScript on port 30002: set_target_payload(2.0, [0, 0, 0.05])"
+  revert: "URScript on port 30002: set_target_payload(0.0, [0, 0, 0])"
+  sources:
+    - url: https://www.universal-robots.com/manuals/EN/HTML/SW5_26/Content/prod-scriptmanual/all_scripts/set_target_payload.htm
+      supports: "set_target_payload(m, cog, ...) sets the mass and centre of gravity of the active payload."
+  notes:
+    - "Not verified yet: the torque/current mismatch is expected only while the robot moves (the captures are done with the robot idle)."
+
+script_error:
+  category: program
+  provoke: "URScript on port 30002: movej(get_actual_joint_positions(), a=1.0, v=)  (missing value)"
+  revert: "nothing to undo (the program is rejected)"
+  sources:
+    - url: https://www.universal-robots.com/articles/ur/interface-communication/overview-of-client-interfaces/
+      supports: "Ports 30001/30002 accept URScript commands."
+
+protective_stop:
+  category: safety
+  provoke: "URScript on port 30002: protective_stop()"
+  revert: "Dashboard (port 29999): unlock protective stop, power on, brake release"
+  sources:
+    - url: https://www.universal-robots.com/manuals/EN/HTML/SW5_26/Content/prod-scriptmanual/all_scripts/protective_stop.htm
+      supports: "protective_stop() triggers a protective stop, pausing the program and stopping motion."
+    - url: https://docs.universal-robots.com/tutorials/communication-protocol-tutorials/rtde-guide.html
+      supports: "safety_status value 3 = PROTECTIVE_STOP (the Real-Time `safety_mode` channel is listed there as deprecated, without values)."
+    - url: https://www.universal-robots.com/articles/ur/dashboard-server-e-series-port-29999/
+      supports: "\"Unlock Protective Stop\" Dashboard command."
+  notes:
+    - "The pendant log is written with a delay: 5.3 s measured once (file size polled every second after a protective stop)."
+
+controller_crash:
+  category: process
+  provoke: "docker exec ursim pkill -f URControl  (SIGTERM)"
+  revert: "docker restart ursim (nothing restarts URControl inside the container)"
+  sources:
+    - url: https://man7.org/linux/man-pages/man7/signal.7.html
+      supports: "SIGTERM, the default signal of pkill, asks a process to terminate."
+    - url: https://hub.docker.com/r/universalrobots/ursim_e-series
+      supports: "Official URSim e-Series Docker image."
+  notes:
+    - "The container's service directory (/home/root/service) is empty: no supervisor restarts URControl or PolyScope (read from /etc/service/*/run and /entrypoint.sh)."
+
+freeze:
+  category: process
+  provoke: "docker pause ursim, then docker unpause ursim after 8 s"
+  revert: "docker unpause ursim"
+  sources:
+    - url: https://docs.docker.com/reference/cli/docker/container/pause/
+      supports: "docker pause suspends all processes of a container."
+    - url: https://www.universal-robots.com/articles/ur/interface-communication/remote-control-via-tcpip/
+      supports: "e-Series Real-Time interface: 500 Hz by design."
+
+polyscope_freeze:
+  category: process
+  provoke: "docker exec ursim pkill -STOP -f felix.jar  (PolyScope's Java process)"
+  revert: "docker exec ursim pkill -CONT -f felix.jar"
+  sources:
+    - url: https://man7.org/linux/man-pages/man7/signal.7.html
+      supports: "SIGSTOP stops a process, SIGCONT resumes it."
+    - url: https://www.universal-robots.com/articles/ur/interface-communication/overview-of-client-interfaces/
+      supports: "The Dashboard server (29999) sends commands to the GUI."
+  notes:
+    - "Port 29999 is owned by PolyScope's Java process, ports 30001-30004 by URControl (netstat -ltnp in the container)."
+    - "Killing PolyScope instead stops the whole container: its start script ends (observed once: `container ... is not running` 3 s after pkill)."
+
+network_cut:
+  category: network
+  provoke: "docker network disconnect bridge ursim"
+  revert: "docker network connect bridge ursim"
+  sources:
+    - url: https://docs.docker.com/reference/cli/docker/network/disconnect/
+      supports: "docker network disconnect removes a container from a network."
+  notes:
+    - "Simulator side effect: inside the container PolyScope reaches the controller through the container's IP address, so their link breaks too."
+
+cpu_starvation:
+  category: resource
+  provoke: "docker update --cpus 0.1 ursim"
+  revert: "docker update --cpus <number of host CPUs> ursim  (--cpus 0 does not remove a limit: observed)"
+  sources:
+    - url: https://docs.docker.com/reference/cli/docker/container/update/
+      supports: "docker update --cpus limits the CPUs a running container may use."
+    - url: https://www.universal-robots.com/articles/ur/interface-communication/remote-control-via-tcpip/
+      supports: "\"we cannot guarantee the frequency for primary, secondary and real-time client interfaces.\""
+
+cpu_overload:
+  category: resource
+  provoke: "16 shell busy loops in the container: sh -c 'while :; do :; done'"
+  revert: "docker exec ursim pkill -f 'while :; do :; done'"
+  sources:
+    - url: https://www.universal-robots.com/articles/ur/interface-communication/remote-control-via-tcpip/
+      supports: "e-Series Real-Time interface: 500 Hz by design, frequency not guaranteed."
+
+network_delay:
+  category: network
+  provoke: "tc qdisc add dev eth0 root netem delay 300ms 50ms  (helper container in URSim's network namespace)"
+  revert: "tc qdisc del dev eth0 root"
+  sources:
+    - url: https://man7.org/linux/man-pages/man8/tc-netem.8.html
+      supports: "netem adds delay (and jitter) to outgoing packets."
+
+packet_loss:
+  category: network
+  provoke: "tc qdisc add dev eth0 root netem loss 20%  (helper container)"
+  revert: "tc qdisc del dev eth0 root"
+  sources:
+    - url: https://man7.org/linux/man-pages/man8/tc-netem.8.html
+      supports: "netem drops a given percentage of packets."
+
+port_blocked:
+  category: network
+  provoke: "iptables -A INPUT -p tcp --dport 30003 -j DROP  (helper container)"
+  revert: "iptables -D INPUT -p tcp --dport 30003 -j DROP"
+  sources:
+    - url: https://man7.org/linux/man-pages/man8/iptables.8.html
+      supports: "An INPUT rule with target DROP discards incoming packets."
+    - url: https://www.universal-robots.com/articles/ur/interface-communication/overview-of-client-interfaces/
+      supports: "Port 30003 is the Real-Time interface."
+  notes:
+    - "Simulator side effect: PolyScope also uses port 30003 through the container's IP address, so its monitoring times out too."
+
+disk_full:
+  category: resource
+  provoke: "dd if=/dev/zero bs=1M, then bs=4k, until the disk is full (URSim runs on its own 512 MB disk)"
+  revert: "rm the fill files"
+  sources:
+    - url: https://man7.org/linux/man-pages/man1/dd.1.html
+      supports: "dd copies data until the output fails (here: no space left on device)."
+  notes:
+    - "Silent while the robot is idle: the captures send protective_stop() 2 s after the fill to force the controller to write."
+    - "With 1 MB blocks only, up to 1 MB stays free: a 329 kB black box was still written (observed once); hence the 4 kB second pass."

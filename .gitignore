@@ -9,3 +9,10 @@ data/
 benchmarks/results/*
 !benchmarks/results/.gitkeep
 manuals/
+
+# LaTeX build files of the fault catalogue
+docs/catalogue/*.aux
+docs/catalogue/*.fdb_latexmk
+docs/catalogue/*.fls
+docs/catalogue/*.log
+docs/catalogue/*.out
