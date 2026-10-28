@@ -18,6 +18,7 @@ import os
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 from robot_agentic.config import load_settings, setup_logging
 from robot_agentic.connectors.ursim import Dashboard, send_script
@@ -34,10 +35,28 @@ FAULTS = {
     "network_cut": "The container is disconnected from the network: every interface becomes unreachable.",
     "cpu_starvation": "The container is limited to 0.1 CPU: every process, the real-time controller included, is starved.",
     "cpu_overload": "16 busy loops run inside the container, competing with the controller for the CPU.",
+    "network_delay": "Every network packet of the container is delayed by 300 ms (± 50 ms).",
+    "packet_loss": "20 % of the container's network packets are lost.",
+    "port_blocked": "Port 30003 (Real-Time interface, 500 Hz signals) is blocked; the other ports keep working.",
+    "disk_full": "The disk holding URSim's files (logs, programs, black boxes) is filled up.",
 }
 
 # Busy loop of the "cpu_overload" fault; its exact text is what `revert` looks for to stop it.
 BURN = "while :; do :; done"
+
+# Network faults run tc / iptables from a small helper image that joins URSim's network
+# namespace: the URSim image has neither tool, nor the right to change its own network.
+NETEM_IMAGE = "robot-agentic-netem"
+NETEM_DOCKERFILE = Path(__file__).parent / "netem"
+NETWORK_FAULTS = {
+    "network_delay": ("tc qdisc add dev eth0 root netem delay 300ms 50ms", "tc qdisc del dev eth0 root"),
+    "packet_loss": ("tc qdisc add dev eth0 root netem loss 20%", "tc qdisc del dev eth0 root"),
+    "port_blocked": ("iptables -A INPUT -p tcp --dport 30003 -j DROP", "iptables -D INPUT -p tcp --dport 30003 -j DROP"),
+}
+
+# File that fills the disk of the "disk_full" fault (URSim must run on its own small disk:
+# see README.md, otherwise this would fill the computer's disk).
+FILL_FILE = "/ursim/.robot_agentic_fill"
 
 
 class URSimFaults:
@@ -60,6 +79,7 @@ class URSimFaults:
 
         Raises:
             ValueError: if the fault is unknown.
+            RuntimeError: for "disk_full", if URSim does not run on its own small disk.
             subprocess.CalledProcessError: if a Docker command fails.
         """
         log.info("injecting fault %s", fault)
@@ -87,8 +107,39 @@ class URSimFaults:
             case "cpu_overload":
                 loops = " ".join([f"(sh -c '{BURN}' &);"] * 16)
                 subprocess.run(["docker", "exec", self.container, "sh", "-c", loops], check=True, capture_output=True, timeout=30)
+            case "network_delay" | "packet_loss" | "port_blocked":
+                self._network(NETWORK_FAULTS[fault][0])
+            case "disk_full":
+                size = subprocess.run(
+                    ["docker", "exec", self.container, "df", "-B1", "--output=size", "/ursim"], capture_output=True, text=True
+                )
+                if int(size.stdout.split()[-1]) > 2 * 1024**3:
+                    raise RuntimeError("URSim's disk is larger than 2 GB: it is probably the computer's disk, refusing to fill it")
+                # dd stops with an error when the disk is full: that is the goal, not a failure. Large
+                # blocks first (fast), then 4 kB blocks for the last megabyte that 1 MB blocks leave.
+                for i, block in enumerate(("1M", "4k")):
+                    cmd = ["docker", "exec", self.container, "dd", "if=/dev/zero", f"of={FILL_FILE}{i}", f"bs={block}"]
+                    subprocess.run(cmd, capture_output=True, timeout=120)
             case _:
                 raise ValueError(f"unknown fault: {fault}")
+
+    def _network(self, command: str) -> None:
+        """Run a tc or iptables command in URSim's network namespace, building the helper image if needed.
+
+        Raises:
+            subprocess.CalledProcessError: if the command fails.
+        """
+        if subprocess.run(["docker", "image", "inspect", NETEM_IMAGE], capture_output=True).returncode != 0:
+            subprocess.run(
+                ["docker", "build", "-q", "-t", NETEM_IMAGE, str(NETEM_DOCKERFILE)], check=True, capture_output=True, timeout=300
+            )
+        net = f"container:{self.container}"
+        subprocess.run(
+            ["docker", "run", "--rm", "--net", net, "--cap-add", "NET_ADMIN", NETEM_IMAGE, "sh", "-c", command],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
 
     def revert(self, fault: str) -> None:
         """Repair a fault and bring the robot back to RUNNING.
@@ -121,6 +172,12 @@ class URSimFaults:
                 )
             case "cpu_overload":
                 subprocess.run(["docker", "exec", self.container, "pkill", "-f", BURN], capture_output=True, timeout=30)
+            case "network_delay" | "packet_loss" | "port_blocked":
+                self._network(NETWORK_FAULTS[fault][1])
+            case "disk_full":
+                subprocess.run(
+                    ["docker", "exec", self.container, "sh", "-c", f"rm -f {FILL_FILE}*"], check=True, capture_output=True, timeout=30
+                )
             case _:
                 raise ValueError(f"unknown fault: {fault}")
         self.wait_ready()

@@ -169,6 +169,8 @@ def _read_flight_report(container: str, name: str, out_dir: Path) -> dict[str, A
     subprocess.run(["docker", "cp", f"{container}:{FLIGHT_REPORTS}/{name}", str(local)], capture_output=True, timeout=60)
     if not local.exists():
         return {"name": name, "error": "could not be copied"}
+    if not zipfile.is_zipfile(local):
+        return {"name": name, "error": f"unreadable zip ({local.stat().st_size} bytes)", "path": str(local)}
     with zipfile.ZipFile(local) as z:
         meta = json.loads(z.read("metadata.json"))
         summary = z.read("summary.log").decode("utf-8", "replace")

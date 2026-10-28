@@ -541,7 +541,12 @@ class URSimConnector(Connector):
                 subprocess.run(
                     ["docker", "cp", f"{self.container}:{FLIGHT_REPORTS}/{local.name}", str(local)], capture_output=True, timeout=60
                 )
-                return read_flight_report(local, self.name)
+                try:
+                    return read_flight_report(local, self.name)
+                except (zipfile.BadZipFile, KeyError):
+                    size = local.stat().st_size if local.exists() else 0
+                    log.warning("black box %s unreadable (%d bytes)", local.name, size)
+                    return f"black box {local.name} is unreadable ({size} bytes): written incompletely, e.g. on a full disk"
         if name == "recover_robot":
             mode = self.dashboard.power_on_and_release()
             if mode == "RUNNING" and self._payload_offset_kg:
