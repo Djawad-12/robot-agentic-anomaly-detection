@@ -658,8 +658,8 @@ before, a new column full of NaN is added on the right and its number is stored 
 \f{\_columns}.
 
 \begin{why}
-\textbf{Why a numpy ring buffer and not a Python list of \f{Sample}s?} Measured on this laptop for
-120\,s of URSim data (60\,000 samples \(\times\) 63 channels): \textbf{30\,MB} as one numpy
+\textbf{Why a numpy ring buffer and not a Python list of \f{Sample}s?} Measured on this laptop with
+60\,000 samples of 63 channels, the size of 120\,s of URSim data: \textbf{30\,MB} as one numpy
 array, \textbf{about 190\,MB} as Python objects. A Raspberry Pi has 1 to 8\,GB, shared with
 everything else. And a list would grow forever unless we deleted old items, which is slow; the
 ring overwrites them for free.
