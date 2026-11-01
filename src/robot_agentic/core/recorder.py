@@ -5,8 +5,8 @@ buffers. A recording is a plain slice of those buffers between two instants: a t
 recorded before, during and after it without missing its start.
 
 Signals are stored in one preallocated numpy array (rows = instants, columns = channels)
-rather than one Python object per sample: 120 s at 500 Hz on 63 channels takes about 60 MB
-instead of more than 200 MB, which matters on a Raspberry Pi.
+rather than one Python object per sample: 120 s at 500 Hz on 63 channels takes about 30 MB
+instead of about 190 MB (both measured), which matters on a Raspberry Pi.
 """
 
 from __future__ import annotations

@@ -1,4 +1,6 @@
 % Guide to the code of Robot Agentic (software anomaly detection), for reading away from the computer.
+% Every example output in this guide was produced by running the code on the URSim captures of
+% data/catalogue/ (28 October 2026), not written by hand.
 % Compile: latexmk -pdf code_guide.tex
 \documentclass[10pt]{article}
 \usepackage[T1]{fontenc}
@@ -11,11 +13,12 @@
 \usepackage{array}
 \usepackage{booktabs}
 \usepackage{tabularx}
+\usepackage{longtable}
 \usepackage{enumitem}
 \usepackage{titlesec}
 \usepackage{tcolorbox}
 \usepackage{tikz}
-\usetikzlibrary{arrows.meta,positioning,fit}
+\usetikzlibrary{arrows.meta,positioning,fit,matrix}
 \usepackage{listings}
 \usepackage[hidelinks]{hyperref}
 \usepackage{fancyhdr}
@@ -24,6 +27,7 @@
 \definecolor{soft}{HTML}{EEF2FF}
 \definecolor{warn}{HTML}{FEF3C7}
 \definecolor{ink2}{HTML}{475569}
+\definecolor{good}{HTML}{DCFCE7}
 \setlength{\parindent}{0pt}
 \setlength{\emergencystretch}{3em}
 \setlength{\parskip}{5pt}
@@ -31,17 +35,29 @@
 \renewcommand{\arraystretch}{1.2}
 \titleformat{\section}{\Large\bfseries\color{accent}}{\thesection}{0.6em}{}
 \titleformat{\subsection}{\large\bfseries}{\thesubsection}{0.6em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{\thesubsubsection}{0.6em}{}
 \titlespacing*{\section}{0pt}{10pt}{4pt}
-\titlespacing*{\subsection}{0pt}{8pt}{2pt}
+\titlespacing*{\subsection}{0pt}{9pt}{2pt}
+\titlespacing*{\subsubsection}{0pt}{7pt}{1pt}
+\setcounter{tocdepth}{2}
 \pagestyle{fancy}\fancyhf{}
 \lhead{\small\color{ink2} Robot Agentic: the code explained}\rhead{\small\color{ink2}\thepage}
 \renewcommand{\headrulewidth}{0.3pt}
-\lstset{basicstyle=\ttfamily\footnotesize,breaklines=true,columns=fullflexible,frame=single,rulecolor=\color{black!20},backgroundcolor=\color{black!3},xleftmargin=2pt,xrightmargin=2pt}
+\lstset{language=Python,basicstyle=\ttfamily\scriptsize,keywordstyle=\color{accent}\bfseries,commentstyle=\color{ink2}\itshape,stringstyle=\color{orange!60!black},
+  breaklines=true,columns=fullflexible,keepspaces=true,frame=single,rulecolor=\color{black!20},backgroundcolor=\color{black!3},
+  xleftmargin=2pt,xrightmargin=2pt,showstringspaces=false,aboveskip=4pt,belowskip=4pt}
+\lstdefinestyle{out}{language={},basicstyle=\ttfamily\scriptsize,backgroundcolor=\color{good!60},keywordstyle={},stringstyle={}}
 
-\newcommand{\f}[1]{\texttt{#1}}
+\newcommand{\brkus}{\textunderscore\allowbreak}
+\newcommand{\f}[1]{\texttt{\let\_\brkus #1}}
 \newtcolorbox{why}{colback=soft,colframe=accent!60,boxrule=0.4pt,arc=2pt,left=4pt,right=4pt,top=2pt,bottom=2pt,fontupper=\small}
 \newtcolorbox{careful}{colback=warn,colframe=orange!70!black,boxrule=0.4pt,arc=2pt,left=4pt,right=4pt,top=2pt,bottom=2pt,fontupper=\small}
 \newcommand{\filehead}[2]{\par\smallskip\noindent{\bfseries\ttfamily #1}\hfill{\small\color{ink2}#2 lines}\par\nobreak}
+% A class: name, kind (dataclass, enum...), file.
+\newcommand{\cls}[3]{\subsubsection*{\texorpdfstring{\colorbox{soft}{\ttfamily\bfseries #1}\quad{\small\mdseries\color{ink2}#2 \textperiodcentered\ #3}}{#1}}\addcontentsline{toc}{subsubsection}{#1}}
+\newcommand{\lbl}[1]{\par\smallskip\noindent\textbf{\color{accent}#1}\quad}
+% Table of fields: field & type & meaning, example
+\newenvironment{fields}{\par\footnotesize\noindent\tabularx{\linewidth}{@{}>{\ttfamily}l>{\ttfamily\raggedright\arraybackslash}p{24mm}>{\raggedright\arraybackslash}X@{}}\toprule\textrm{\textbf{Field}} & \textrm{\textbf{Type}} & \textbf{Meaning, example}\\\midrule}{\bottomrule\endtabularx\par}
 
 \begin{document}
 
@@ -51,19 +67,19 @@
 \vspace{4pt}
 {\LARGE The code explained}\par
 \vspace{10pt}
-{\large Software anomaly detection on URSim: what each part does, how it was built, which libraries and why, how big it is, and what is still missing.}\par
+{\large Software anomaly detection on URSim: every class, its fields and their types, why it exists, a real example, and who uses it. Plus the libraries, the size of the code and what is still missing.}\par
 \vfill
-Branch \f{refactor/software-detection}, 9 commits on top of \f{main}\par
+Branch \f{refactor/software-detection}\par
 State of the code on 1 November 2026\par
 \vspace{6pt}
-{\small\color{ink2} Written to be read on a phone or a tablet: A5 pages, one idea per section. Words in \f{typewriter} are names in the code; the glossary at the end explains the robot words.}
+{\small\color{ink2} Written to be read on a phone or a tablet. Words in \f{typewriter} are names in the code. \textbf{Every example output in green boxes was produced by running the code on what URSim really wrote during the fault captures of 28 October 2026}, not invented. Chapter~\ref{sec:python} explains the Python notions the rest relies on; the glossary at the end explains the robot words.}
 \vspace*{10mm}
 \end{titlepage}
 
 \tableofcontents
 \newpage
 
-% ---------------------------------------------------------------------------------------------
+% =============================================================================================
 \section{The project in one page}
 
 \textbf{The goal.} When an industrial robot breaks down, a technician looks at what the robot
@@ -82,25 +98,22 @@ It then runs small, slow, operator-approved tests on the robot, and hands in a r
 mix in one investigation:
 \begin{itemize}
 \item \textbf{software anomaly detection}: uses only what the robot's software reports (the four sources above). \emph{This is the only one in the code today.}
-\item \textbf{physical anomaly detection}: uses our own sensors (microphone, accelerometer, current clamp) on the machine, even a closed one. Planned for later (fan first, then the RoArm-M2-S).
+\item \textbf{physical anomaly detection}: uses our own sensors (microphone, accelerometer, current clamp) on the machine, even a closed one. Planned for later.
 \end{itemize}
 
-\textbf{The test bench.} We do not have a real Universal Robots arm. We use \textbf{URSim}, the
-official simulator from Universal Robots: the real controller software, running in a Docker
-container on the laptop. To the code, URSim looks exactly like a real UR3e robot: same network
-ports, same binary formats, same logs.
+\textbf{The test bench.} We use \textbf{URSim}, the official Universal Robots simulator: the real
+controller software, running in a Docker container on the laptop. To the code, URSim looks
+exactly like a real UR3e robot: same network ports, same binary formats, same logs.
 
-\textbf{Two ways to use the agent.}
+\textbf{Three commands.}
 \begin{itemize}
-\item \f{robot-agentic check}: a spot check, on demand (``is the robot OK?''), or a question (``the arm struggles when lifting'').
+\item \f{robot-agentic check}: a spot check, on demand, or a question (``the arm struggles when lifting'').
 \item \f{robot-agentic loop}: continuous monitoring. Simple rules (no AI, no cost) watch the logs and fault codes; when something looks wrong, the operator is asked whether to start an investigation.
+\item \f{robot-agentic health}: checks that everything is connected.
 \end{itemize}
-And \f{robot-agentic health} checks that everything is connected.
 
-% ---------------------------------------------------------------------------------------------
+% =============================================================================================
 \section{The big picture}
-
-The code is cut into four layers. Each layer only knows the one below it.
 
 \begin{center}
 \begin{tikzpicture}[
@@ -133,7 +146,7 @@ The code is cut into four layers. Each layer only knows the one below it.
 
 \begin{enumerate}
 \item \textbf{The connector} is the only part that knows URSim. It turns raw bytes and text into
-four simple Python types: \f{Sample}, \f{LogLine}, \f{FaultCode} and \f{Recording}.
+a few simple Python objects (\f{Sample}, \f{LogLine}, \f{FaultCode}, chapter~\ref{sec:events}).
 \item \textbf{The core} (no AI, no robot brand): the \textbf{recorder} keeps the last two minutes of
 every stream in memory; the \textbf{checks} raise alerts; the \textbf{safety} layer refuses or
 asks before any movement.
@@ -141,56 +154,74 @@ asks before any movement.
 what Claude asks for, \textbf{context} turns recordings into plots and tables, \textbf{llm}
 talks to Claude.
 \item \textbf{Around it}: the command line, the terminal interface, the settings, the
-documentation search; and outside the package, the fault-injection tools, the benchmarks
-and the tests.
+documentation search; and outside the package, the fault tools, the benchmarks, the tests.
 \end{enumerate}
 
 \begin{why}
 \textbf{Why this cut?} Plugging in a new machine (the RoArm-M2-S, a car through OBD-II\ldots)
 means writing one new connector file. Nothing else changes, because the rest of the code only
-knows the four simple types and the \f{Connector} contract.
+knows the simple objects and the \f{Connector} contract.
 \end{why}
 
-% ---------------------------------------------------------------------------------------------
+\subsection*{The life of one fault, from URSim to the operator}
+To see how the classes fit, here is what really happened in the code when we sent
+\f{protective\_stop()} to URSim on 28 October 2026 at 23:32:12. Each class named here is
+explained in its own section later.
+\begin{enumerate}
+\item URSim's controller writes in its log file:
+\f{2026-10-28\_23:32:12:07913 00:12:07:710 WARNING - Protective stop. Error code: C209A0}
+\item \f{URSimConnector.logs()} reads that line and \f{parse\_log\_line} turns it into a
+\f{LogLine} object: level \f{WARNING}, source \f{controller}, text
+\f{Protective stop. Error code: C209A0}.
+\item 24\,ms after the command, the Primary port sends a binary packet; \f{parse\_primary} turns
+it into a \f{FaultCode}: code \f{C209A0}, level \f{WARNING}.
+\item In the Real-Time stream, the \f{Sample}s show \f{safety\_mode} going from 1 to 3 at
++0.027\,s, and \f{speed\_scaling} dropping to 0.
+\item The \f{Recorder} stores all of it: the \f{LogLine} and \f{FaultCode} in its event lists,
+the \f{Sample} values in its numpy ring buffer.
+\item The \f{EventWatcher} receives the \f{FaultCode} and the \f{LogLine} and produces two
+\f{Alert}s: \emph{warning: fault code C209A0}, and \emph{critical: log: Protective stop. Error
+code: C209A0} (the text contains ``protective stop'').
+\item In loop mode, the graph shows the alert and asks the operator whether to investigate.
+\item If yes, the \f{Toolbox} gives Claude the logs, fault codes and black box; Claude may ask
+for a test, which the \f{SafetyPolicy} checks and the operator approves; Claude finally calls
+\f{submit\_report}.
+\end{enumerate}
+
+% =============================================================================================
 \section{How a run goes, step by step}
 
 \subsection{\f{robot-agentic check "the arm struggles"}}
 \begin{enumerate}
-\item \f{\_\_main\_\_.py} reads the settings (\f{.env}), creates the URSim connector, starts
-the recorder (three background threads read signals, logs and fault codes), and builds the
-toolbox.
-\item The graph starts at the \f{investigate} step. It sends Claude a first message with what
-it would ask for anyway: the request, the robot state, the fault codes and the log warnings of
-the last two minutes.
+\item \f{\_\_main\_\_.py} reads the \f{Settings}, creates the \f{URSimConnector}, starts the
+\f{Recorder} (three background threads), and builds the \f{Toolbox}.
+\item The graph starts at the \f{investigate} step. It sends Claude a first message with the
+request, the robot state, the fault codes and the log warnings of the last two minutes.
 \item Claude thinks, then calls tools: e.g.\ \f{search\_docs("C209")}, then
 \f{joint\_test(joint=1, delta\_deg=3)}.
-\item For a test, the safety layer checks the bounds (±5° max), asks the operator
-``\emph{The agent wants to run joint\_test(joint=1, delta\_deg=3). Allow?}'' and the PIN once.
-\item The connector sends a tiny URScript program to the robot; the recorder cuts out
-everything that happened from 1\,s before to 1.5\,s after the test.
-\item Claude receives three things: a text summary (stream cuts, fault codes, log warnings),
-a plot of the channels that moved most, and the full values as a table.
-\item This repeats (25 turns maximum) until Claude calls \f{submit\_report}. The report is
-saved as JSON in \f{data/reports/} and shown in the terminal, with the cost of the calls.
+\item For a test, the \f{SafetyPolicy} checks the bounds, asks the operator, and asks the PIN once.
+\item The connector sends a tiny URScript program; the \f{Recorder} cuts out everything that
+happened from 1\,s before to 1.5\,s after the test into a \f{Recording}.
+\item Claude receives a text summary, a plot, and the full values as a table.
+\item This repeats (25 turns maximum) until Claude calls \f{submit\_report}. The report is saved
+as JSON in \f{data/reports/} and shown in the terminal, with the cost.
 \end{enumerate}
 
 \subsection{\f{robot-agentic loop}}
 \begin{enumerate}
-\item The graph starts at \f{watch}: it reads every new log line and fault code. No Claude call,
-no cost.
-\item The \f{EventWatcher} rules decide if an event is an alert (a fault code, a dangerous
-phrase like ``protective stop'', or an ERROR line).
+\item The graph starts at \f{watch}: it reads every new \f{LogLine} and \f{FaultCode}. No Claude
+call, no cost.
+\item The \f{EventWatcher} decides whether an event deserves an \f{Alert}.
 \item The operator is asked: ``\emph{Anomaly: fault code C209A0. Start a root-cause analysis?}''
-\item If yes: the same investigation as above, then monitoring resumes. Events that arrived
-during the investigation are dropped (they were mostly caused by the agent's own tests).
+\item If yes: the same investigation as above, then monitoring resumes.
 \end{enumerate}
 
 \subsection{\f{robot-agentic health --api}}
-One line per check, \(\checkmark\) or \(\times\): Dashboard reachable and robot RUNNING,
-Real-Time stream with its rate and channel count, log stream, fault stream, documents found,
-and (with \f{--api}) access to the Claude model, through a free API request.
+One line per check: Dashboard reachable and robot RUNNING, Real-Time stream with its rate and
+channel count, log stream, fault stream, documents found, and (with \f{--api}) access to the
+Claude model through a free request.
 
-% ---------------------------------------------------------------------------------------------
+% =============================================================================================
 \section{Languages, libraries and tools, and why}
 
 \subsection{Inside the program}
@@ -198,134 +229,578 @@ and (with \f{--api}) access to the Claude model, through a free API request.
 \begin{tabularx}{\linewidth}{@{}>{\bfseries}l X@{}}
 \toprule
 Python 3.11+ & The language of robotics and AI tooling; every library below exists for it; it runs on the Raspberry Pi. \\
-anthropic (2.3) & Official Claude SDK. Handles retries, authentication (API key or \f{ant auth login}), and the newer features we use: adaptive thinking, effort, prompt caching, server fallback. \\
-LangGraph (1.2) & Describes the investigation as a small graph (watch \(\to\) ask \(\to\) investigate \(\to\) report). You chose to keep it: the flow is visible, and adding a step later (e.g.\ ``ask a human expert'') is one node. \\
-numpy (2.5) & The ring buffer of signals (one big array), resampling, cut detection. 500 samples/s \(\times\) 63 channels is too much for plain Python objects on a Pi. \\
-matplotlib (3.11) & Draws the plot sent to Claude after each test (PNG, in memory). \\
-pypdf (6.21) & Reads PDF manuals to index them, if PDFs are added to \f{manuals/}. \\
+anthropic (2.3) & Official Claude SDK: retries, authentication, adaptive thinking, effort, prompt caching, server fallback. \\
+LangGraph (1.2) & Describes the investigation as a small graph of steps. You chose to keep it: the flow is visible, and adding a step later is one node. \\
+numpy (2.5) & The ring buffer of signals, resampling, cut detection. \\
+matplotlib (3.11) & Draws the plot sent to Claude after each test. \\
+pypdf (6.21) & Reads PDF manuals, if PDFs are added to \f{manuals/}. \\
 python-dotenv & Reads the \f{.env} file (API key, robot address, PIN). \\
-PyYAML & Reads the scenarios, the catalogue sources (and later the detection thresholds). \\
+PyYAML & Reads the scenarios and the catalogue sources (later the detection thresholds). \\
 \bottomrule
 \end{tabularx}
 \end{center}
 
 \subsection{Python's own library (no install)}
 \f{socket} and \f{struct} (talk to the robot's ports and decode its binary packets),
-\f{subprocess} (run \f{docker} commands), \f{threading} and \f{queue} (the three reader
-threads), \f{dataclasses} (the simple types), \f{zipfile} (open black boxes), \f{gzip}/\f{json}
-(save recordings), \f{logging}, \f{argparse} (command line).
+\f{subprocess} (run \f{docker} commands), \f{threading} and \f{queue} (the reader threads),
+\f{dataclasses}, \f{enum}, \f{abc}, \f{typing} (the building blocks of chapter~\ref{sec:python}),
+\f{collections.deque}, \f{zipfile} (black boxes), \f{gzip}/\f{json} (recordings),
+\f{logging}, \f{argparse}.
 
 \subsection{For development}
-\begin{center}\small
-\begin{tabularx}{\linewidth}{@{}>{\bfseries}l X@{}}
-\toprule
-pytest (9.1) & 24 automatic tests, run in seconds, with no robot, no network and no cost. \\
-ruff (0.17) & Checks style, imports, \emph{and} the two rules of CONTRIBUTING.md that a tool can check: type annotations and docstrings everywhere. \\
-setuptools & Packages the project so that \f{pip install -e .} creates the \f{robot-agentic} command. \\
-\bottomrule
-\end{tabularx}
-\end{center}
+\textbf{pytest} (24 tests in seconds, no robot, no network, no cost), \textbf{ruff} (style, and the
+two rules a tool can check: type annotations and docstrings everywhere), \textbf{setuptools}
+(creates the \f{robot-agentic} command).
 
 \subsection{Outside the program}
-\begin{center}\small
-\begin{tabularx}{\linewidth}{@{}>{\bfseries}l X@{}}
-\toprule
-Docker & Runs URSim (image \f{universalrobots/ursim\_e-series}, version 5.26.1). Also the tool to provoke faults: pause, CPU limit, network disconnect. \\
-Alpine helper image & 19\,MB image with \f{tc} and \f{iptables}, joined to URSim's network to add delay, loss or block a port. URSim's image has neither tool. \\
-udisks & Attaches the 512\,MB disk file URSim runs on, without admin rights, so ``disk full'' never fills the laptop. \\
-LaTeX & The fault catalogue and this guide. \\
-\bottomrule
-\end{tabularx}
-\end{center}
+\textbf{Docker} (runs URSim, and provokes faults: pause, CPU limit, network disconnect), an
+\textbf{Alpine helper image} (\f{tc} and \f{iptables} for network faults), \textbf{udisks}
+(URSim's own 512\,MB disk), \textbf{LaTeX} (the catalogue and this guide).
 
 \subsection{What was \emph{not} used, on purpose}
 \begin{itemize}
 \item \textbf{pydantic} (validated models): too slow at 500 samples/s, and each connector already parses strictly. Plain dataclasses instead.
 \item \textbf{pandas}: heavy for a Raspberry Pi; numpy is enough.
-\item \textbf{A vector database / embeddings} for the documentation: fault codes and part names are exact words, which classic keyword ranking (BM25) handles better, with zero dependency and zero cost.
-\item \textbf{LangChain} or an agent framework around Claude: the loop is 60 lines and fully visible; LangGraph is used only for the flow.
-\item \textbf{The UR RTDE library}: we read the Real-Time port directly with \f{struct}, which needs no extra package and works the same on a Pi.
+\item \textbf{A vector database / embeddings}: fault codes and part names are exact words, which keyword ranking (BM25) handles better, with zero dependency and zero cost.
+\item \textbf{LangChain} around Claude: the loop is 60 lines and fully visible.
+\item \textbf{The UR RTDE library}: we read the Real-Time port directly with \f{struct}.
 \end{itemize}
 
-% ---------------------------------------------------------------------------------------------
-\section{The core: \f{src/robot\_agentic/core/}}
+% =============================================================================================
+\section{The Python building blocks used in this code}\label{sec:python}
 
-These five files know nothing about Universal Robots or Claude.
+The rest of the guide uses these notions constantly. Each one is shown with an example taken
+from our own code.
 
+\subsection{Class and object}
+A \textbf{class} is a mould; an \textbf{object} (or \emph{instance}) is one thing made with it.
+\f{FaultCode} is a class: it says ``a fault code has a time, a code, a message and a level''.
+The fault URSim sent at 23:32:12 is one object made from it:
+\begin{lstlisting}
+fault = FaultCode(code="C209A0", message="[UNDEFINED]", level=Level.WARNING)
+fault.code        # -> "C209A0"
+\end{lstlisting}
+A class can also hold \textbf{methods}: functions that work on the object's data, written
+\f{object.method()}, e.g.\ \f{recorder.window(t0, t1)}.
+
+\subsection{Type annotations}
+Every field and every function says which type of value it holds or returns. Python does not
+enforce them when the program runs, but \f{ruff} and editors use them to catch mistakes, and
+they tell \emph{you} what to expect. The types you will meet:
+\begin{center}\footnotesize
+\begin{tabularx}{\linewidth}{@{}>{\ttfamily}l X >{\ttfamily}l@{}}
+\toprule
+\textrm{\textbf{Type}} & \textbf{Means} & \textrm{\textbf{Example}} \\
+\midrule
+float & a decimal number & 0.6727 \\
+int & a whole number & 5 \\
+str & text & "C209A0" \\
+bool & true or false & True \\
+list[str] & an ordered list of texts & ["a", "b"] \\
+dict[str, float] & a table from names to numbers & \{"robot\_mode": 7.0\} \\
+tuple[bool, str] & a fixed pair & (True, "dashboard: \ldots") \\
+str | None & a text, or nothing at all & None \\
+Path & a file or folder path & Path("data/reports") \\
+np.ndarray & a numpy array of numbers & array([0.1, 0.2]) \\
+Callable[[str], bool] & a function taking a text, returning yes/no & hmi.confirm \\
+Iterator[Sample] & an endless supply of samples & connector.signals() \\
+Any & anything (only for JSON from Claude) & \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Dataclass: a class that only holds data}
+Most of our classes are \textbf{dataclasses}: you list the fields with their types, and Python
+writes the boring code for you (creating the object, printing it, comparing two of them).
+\begin{lstlisting}
+@dataclass(kw_only=True)
+class LogLine:
+    t: float = field(default_factory=time.time)   # filled in automatically
+    level: Level = Level.INFO                      # default value
+    source: str = ""
+    text: str                                      # must be given
+\end{lstlisting}
+Options we use, and why:
+\begin{itemize}
+\item \f{kw\_only=True}: arguments must be named, \f{LogLine(text="\ldots", level=\ldots)}. With
+four fields of similar types, it makes it impossible to swap the code and the message by mistake.
+\item \f{slots=True} (only on \f{Sample}): the object uses less memory and is faster to create. It
+matters for \f{Sample}, made 500 times per second.
+\item \f{frozen=True} (only on \f{Param}): the object cannot be changed after creation. A safety
+bound must never be modified while the program runs.
+\item \f{field(default\_factory=time.time)}: the time is taken \emph{when each object is created},
+not once when the program starts.
+\end{itemize}
+
+\subsection{Enum: a closed list of allowed values}
+\f{Level} is an \textbf{enum}: a level can only be \f{DEBUG}, \f{INFO}, \f{WARNING},
+\f{ERROR} or \f{FATAL}. Writing \f{Level.WARNIGN} (typo) fails at once instead of silently
+creating a sixth level. We use \f{StrEnum}, whose values are also texts, so they are saved to
+JSON as \f{"WARNING"} without conversion.
+
+\subsection{Abstract class: a contract}
+\f{Connector} is an \textbf{abstract base class} (ABC). It lists methods without writing them.
+A class that ``inherits'' from it (\f{class URSimConnector(Connector)}) must write every one of
+them, or Python refuses to create the object. It is a contract checked by the language.
+
+\subsection{Protocol: a contract without inheritance}
+\f{LLM} is a \textbf{Protocol}: it says ``anything with a \f{create(system, messages, tools)}
+method''. The real \f{ClaudeClient} and the tests' \f{ScriptedLLM} both qualify, without
+being related. We use it where the test double has nothing in common with the real thing.
+
+\subsection{TypedDict: a dictionary with known keys}
+LangGraph passes its state as a plain dictionary. \f{State} is a \textbf{TypedDict}: it lists the
+allowed keys and their types (\f{"report": dict | None}\ldots), so a typo in a key is caught.
+
+\subsection{Generator: a function that produces items one by one}
+\f{signals()} never ``returns'' a list: it \f{yield}s one \f{Sample} at a time, forever, as
+packets arrive. The reader writes \f{for sample in connector.signals():} and gets each sample the
+moment it exists. This is what \f{Iterator[Sample]} means.
+
+\subsection{Threads, queues, locks, events}
+\begin{itemize}
+\item A \textbf{thread} is a piece of the program running at the same time as the rest. The
+\f{Recorder} has three: one waits for signals, one for log lines, one for fault codes. Without
+them, waiting for a log line would block the signals.
+\item A \textbf{Queue} is a thread-safe mailbox: one thread puts events in, another takes them
+out. The loop mode reads alerts through one.
+\item A \textbf{Lock} makes sure two threads never touch the buffers at the same moment (one
+writing a sample while the other cuts a recording).
+\item An \textbf{Event} is a shared on/off flag: \f{Recorder.stop()} sets it, the threads see it
+and end.
+\end{itemize}
+
+\subsection{deque: a list that forgets its oldest items}
+\f{deque(maxlen=5000)} keeps at most 5\,000 items; adding the 5\,001st silently drops the first.
+The recorder keeps the last 5\,000 log lines and 1\,000 fault codes this way, so memory never
+grows.
+
+\subsection{numpy array and NaN}
+A numpy array is a block of numbers stored side by side in memory, like a spreadsheet without
+formatting. It is about six times smaller than the same numbers as Python objects (measured
+below) and computations on whole columns are fast. \textbf{NaN} (``not a number'') is the value
+of an empty cell: a channel missing from a sample.
+
+% =============================================================================================
+\section{The shared objects: \f{core/events.py}}\label{sec:events}
 \filehead{events.py}{123}
-The shared vocabulary. Every other file speaks in these types:
-\begin{itemize}
-\item \f{Sample}: one instant of the signal stream, a time \f{t} and a dictionary
-\f{\{"joint\_2\_current\_actual": 0.41, \ldots\}}.
-\item \f{LogLine} (time, level, source, text) and \f{FaultCode} (time, code, message, level).
-\item \f{Level} (DEBUG to FATAL) and \f{Severity} (warning, critical).
-\item \f{Alert}: what wakes the agent up, with its evidence.
-\item \f{Param} and \f{ToolSpec}: how a connector describes a test, e.g.\ ``\f{joint}: integer 0--5,
-\f{delta\_deg}: number \textminus{}5 to 5, moves the machine''.
-\end{itemize}
+The shared vocabulary. Every other file speaks in these eight classes. They contain no logic,
+only data, so they are all dataclasses or enums.
+
+% ---------------------------------------------------------------
+\cls{Sample}{dataclass (slots, keyword-only)}{core/events.py}
+\lbl{What} One instant of the signal stream: every channel measured at the same moment.
+\begin{fields}
+t & float & reception time, in seconds since 1 January 1970 (``Unix time''). \f{1793226730.07} is 28 Oct 2026, 23:32:10.07. \\
+values & dict[str, float] & channel name \(\to\) value. 63 channels on URSim, 24 on the fake arm. \\
+\end{fields}
+\lbl{Real example} A \f{Sample} received from URSim two seconds before the protective stop
+(12 of its 63 values):
+\begin{lstlisting}[style=out]
+Sample(t=1793226730.0686, values={
+  "joint_1_q_actual": -1.7271,      "joint_1_q_target": -1.7271,  # rad
+  "joint_1_current_actual": 0.6727, "joint_1_torque_target": 7.3079,  # A, Nm
+  "joint_1_motor_temperature": 25.0,  # deg C
+  "joint_4_current_actual": 0.0017,   # the wrist carries almost nothing
+  "robot_mode": 7.0,      # 7 = RUNNING
+  "safety_mode": 1.0,     # 1 = normal
+  "speed_scaling": 0.0,   # no program running
+  "main_voltage": 48.0, "tool_acc_z": -9.8139, ...})   # gravity
+\end{lstlisting}
+\lbl{Why} Grouping the channels by instant keeps them aligned in time: the shoulder current and
+the shoulder target torque of one \f{Sample} were measured together, so they can be compared
+without any resampling. A dictionary (rather than fixed fields) lets each machine have its own
+channels.
+\lbl{Who} Created by \f{parse\_realtime} (URSim) or \f{FakeConnector.signals()}, 500 per second.
+Read by \f{Recorder}, which copies the values into its numpy buffer and throws the object away.
+
+% ---------------------------------------------------------------
+\cls{Level}{StrEnum}{core/events.py}
+\lbl{What} The severity of a log line or fault code: \f{DEBUG < INFO < WARNING < ERROR < FATAL}.
+\lbl{Why} Each source writes severity its own way; the connector translates them all to this one
+scale, so the rest of the code compares levels without knowing URSim:
+\begin{center}\footnotesize
+\begin{tabularx}{\linewidth}{@{}l X@{}}
+\toprule
+\textbf{Source} & \textbf{Written as \(\to\) Level} \\
+\midrule
+Controller log & \f{WARNING}, \f{ERROR}\ldots\ \(\to\) the same \\
+PolyScope log & \f{WARN} \(\to\) \f{WARNING} (with colour codes removed) \\
+Primary port & a number 0--5 \(\to\) \f{DEBUG}, \f{INFO}, \f{WARNING}, \f{WARNING}, \f{ERROR}, \f{FATAL} \\
+Pendant log & no documented level: \f{INFO} for code \f{C0A0}, otherwise \f{WARNING} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+\lbl{Who} \f{get\_recent\_logs(min\_level="WARNING")} keeps lines at that level or above; the
+\f{EventWatcher} raises an alert on \f{ERROR} and \f{FATAL}.
+
+% ---------------------------------------------------------------
+\cls{LogLine}{dataclass}{core/events.py}
+\lbl{What} One line of the machine's log, already understood.
+\begin{fields}
+t & float & reception time (Unix seconds). \\
+level & Level & e.g.\ \f{Level.ERROR}. \\
+source & str & which program wrote it: \f{"controller"}, \f{"polyscope"} or \f{"pendant"}. \\
+text & str & the message alone, without date, level or colour codes. \\
+\end{fields}
+\lbl{Real examples} Raw line written by URSim \(\to\) \f{LogLine} produced by \f{parse\_log\_line}:
+\begin{lstlisting}[style=out]
+RAW  2026-10-28_23:31:46:06655 00:11:42:676 ERROR   - RuntimeException: Syntax error
+     on line 1: movej(get_actual_joint_positions(), a=1.0, v=)
+OBJ  level=ERROR  source=controller
+     text="RuntimeException: Syntax error on line 1: movej(get_actual_..., v=)"
+
+RAW  <ESC>[1;31m2026-10-28 23:34:51.762 ERROR<ESC>[m -  ControllerSocket: 3 consecutive
+     read timeouts, disconnecting <ESC>[1;31m{thread: ControllerConnectionThread, ...}
+OBJ  level=ERROR  source=polyscope
+     text="ControllerSocket: 3 consecutive read timeouts, disconnecting"
+
+RAW  3.5 :: 0000d00h15m28.158s :: 2026-10-28 23:32:12.092 :: -2 :: C209A0:6 :: null
+     :: 2 ::  ::  :: 0
+OBJ  level=WARNING  source=pendant  text="C209A0"
+\end{lstlisting}
+\lbl{Why} Three files, three formats, colour codes, invisible characters: the agent should never
+see that mess. It sees one clean shape, whatever the machine.
+\lbl{Who} Created by \f{URSimConnector.logs()} (live) and \f{read\_flight\_report} (black boxes);
+stored by \f{Recorder}; judged by \f{EventWatcher}; shown to Claude by \f{get\_recent\_logs} and
+after each test.
+
+% ---------------------------------------------------------------
+\cls{FaultCode}{dataclass}{core/events.py}
+\lbl{What} An official error raised by the controller.
+\begin{fields}
+t & float & reception time. \\
+code & str & written as on the robot's tablet: \f{C}\emph{code}\f{A}\emph{argument}. \f{C209A0} = code 209, argument 0. \\
+message & str & the source and text sent with it, e.g.\ \f{"[UNDEFINED]"}. \\
+level & Level & \f{ERROR} by default; URSim sends \f{C209A0} at \f{WARNING}. \\
+\end{fields}
+\lbl{Real example} The only official fault code seen in the whole catalogue (5 runs out of 5),
+received 24\,ms after \f{protective\_stop()}:
+\begin{lstlisting}[style=out]
+FaultCode(t=+0.024 s, code="C209A0", message="[UNDEFINED]", level=WARNING)
+\end{lstlisting}
+\lbl{Why separate from \f{LogLine}} A fault code is an official, numbered, documented event: it
+always deserves an alert, and its number is the best search key in the documentation
+(\f{C209} \(\to\) ``A protective stop was triggered''). A log line is free text.
+\lbl{Who} Created by \f{parse\_primary}; stored by \f{Recorder}; always turned into an \f{Alert}
+by \f{EventWatcher}; shown by \f{get\_recent\_faults}.
+
+% ---------------------------------------------------------------
+\cls{Severity}{StrEnum}{core/events.py}
+\lbl{What} How serious an \f{Alert} is: \f{warning} or \f{critical}. Different from \f{Level}:
+\f{Level} is what the \emph{machine} said, \f{Severity} is what \emph{our rules} conclude.
+A \f{WARNING} log line containing ``protective stop'' gives a \f{critical} alert.
+
+% ---------------------------------------------------------------
+\cls{Alert}{dataclass}{core/events.py}
+\lbl{What} An anomaly found by the rules, that wakes the agent up in loop mode.
+\begin{fields}
+t & float & time of the event that caused it. \\
+reason & str & one line for the operator, also the key for the 30\,s repeat filter. \\
+severity & Severity & \f{warning} or \f{critical}. \\
+evidence & list[str] & the exact lines or codes that triggered it, given to Claude as is. \\
+\end{fields}
+\lbl{Real example} From the protective stop capture:
+\begin{lstlisting}[style=out]
+Alert(severity=critical, reason="log: Protective stop. Error code: C209A0",
+      evidence=["Protective stop. Error code: C209A0"])
+\end{lstlisting}
+\lbl{Who} Created by \f{EventWatcher.feed}; shown in red by \f{CLI.alert}; written at the top of
+Claude's first message: ``\emph{Anomaly detected: log: Protective stop\ldots\ Evidence: \ldots}''.
+
+% ---------------------------------------------------------------
+\cls{Param}{dataclass (frozen)}{core/events.py}
+\lbl{What} One numeric argument of a robot test, with its allowed range.
+\begin{fields}
+kind & str & JSON type: \f{"number"} or \f{"integer"}. \\
+low & float & smallest allowed value, e.g.\ \f{-5}. \\
+high & float & largest allowed value, e.g.\ \f{5}. \\
+description & str & unit and meaning, read by Claude: \f{"amplitude in degrees"}. \\
+\end{fields}
+
+% ---------------------------------------------------------------
+\cls{ToolSpec}{dataclass}{core/events.py}
+\lbl{What} The description of one action a connector offers to Claude.
+\begin{fields}
+name & str & \f{"joint\_test"}. \\
+description & str & what it does, for Claude. \\
+params & dict[str, Param] & \f{\{"joint": Param(\ldots), "delta\_deg": Param(\ldots)\}}. \\
+moves\_machine & bool & \f{True}: goes through operator approval and is recorded. \\
+\end{fields}
+Its method \f{input\_schema()} turns it into the format the Claude API expects. Real output for
+\f{joint\_test}:
+\begin{lstlisting}[style=out]
+{"type": "object",
+ "properties": {
+   "joint":     {"type": "integer", "minimum": 0,  "maximum": 5,
+                 "description": "0 base, 1 shoulder, 2 elbow, 3-5 wrists"},
+   "delta_deg": {"type": "number",  "minimum": -5, "maximum": 5,
+                 "description": "amplitude in degrees"}},
+ "required": ["joint", "delta_deg"], "additionalProperties": false}
+\end{lstlisting}
 \begin{why}
-The bounds of a test are written \emph{once}, in its \f{Param}. They are shown to Claude (as
-\f{minimum}/\f{maximum} in the tool's JSON schema) \emph{and} enforced by the safety layer, so
-the two can never disagree.
+\textbf{Why \f{Param} and \f{ToolSpec}?} The range ``\textminus{}5 to 5 degrees'' is written \emph{once}. The
+same object is shown to Claude (so it rarely asks for 30°) \emph{and} enforced by
+\f{SafetyPolicy} (so it can never get 30°). Two separate lists would one day disagree.
 \end{why}
 
+% =============================================================================================
+\section{The contract: \f{core/interfaces.py}}
 \filehead{interfaces.py}{69}
-The \f{Connector} contract: what every machine must offer. Three streams (\f{signals()},
-\f{logs()}, \f{faults()}), \f{docs()}, \f{tools()}, \f{call\_tool()}, \f{stop()},
-\f{health()}, and an optional \f{snapshot()} (current state). It is an abstract base class:
-Python refuses to create a connector that forgets one method.
+\cls{Connector}{abstract base class}{core/interfaces.py}
+\lbl{What} What every machine must offer. There are no fields, only methods:
+\begin{center}\footnotesize
+\begin{tabularx}{\linewidth}{@{}>{\ttfamily}l>{\ttfamily}l X@{}}
+\toprule
+\textrm{\textbf{Method}} & \textrm{\textbf{Returns}} & \textbf{On URSim} \\
+\midrule
+signals() & Iterator[Sample] & reads port 30003, 500 samples/s \\
+logs() & Iterator[LogLine] & \f{tail -F} on the three log files \\
+faults() & Iterator[FaultCode] & reads port 30001 \\
+docs() & list[str] & the files in \f{manuals/ursim/} \\
+tools() & list[ToolSpec] & the six tests \\
+call\_tool(name, args) & str | Recording & runs a test, or opens a black box \\
+stop() & None & sends \f{stopj(2.0)} \\
+health() & list[tuple[bool, str]] & \f{[(True, "dashboard: robot mode RUNNING"), \ldots]} \\
+snapshot() & dict[str, Any] & mode, safety, program, version (optional) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+\lbl{Why} The agent never imports \f{URSimConnector}: it only calls these methods. The tests
+pass a \f{FakeConnector} instead, and later the RoArm connector will slot in the same way.
+\lbl{Who} Implemented by \f{URSimConnector} and \f{FakeConnector}; used by \f{Recorder}
+(the three streams), \f{Toolbox} (tools, docs, state) and \f{health}.
 
+% =============================================================================================
+\section{The memory: \f{core/recorder.py}}
 \filehead{recorder.py}{305}
-The memory of the system.
-\begin{itemize}
-\item \f{Recorder} starts one thread per stream. If a stream breaks (robot off, network cut), the
-thread waits one second and reconnects; the cause is kept in \f{errors}, because a lost stream
-is itself a clue.
-\item The signals go into a \textbf{ring buffer}: one numpy array of 60\,000 rows (120\,s at
-500\,Hz) where the newest row overwrites the oldest. 120\,s on 63 channels is about 60\,MB
-instead of more than 200\,MB with one Python object per sample.
-\item \f{window(t0, t1)} cuts any time slice out of the buffers into a \f{Recording};
-\f{record(action)} runs a test and keeps 1\,s before and 1.5\,s after it. Because the buffer
-is always filling, the start of a test is never missed.
-\item \f{subscribe()} gives a queue that receives every new log line and fault code: this is
-what the loop mode watches.
-\item \f{stop()} ends the threads cleanly (added after a bug: leftover threads polluted the
-fault captures).
-\item \f{Recording} can \f{resample} (average down to fewer points per second, which keeps short
-peaks), \f{save} to \f{.json.gz} and \f{load}.
-\end{itemize}
 
-\filehead{checks.py}{87}
-The rules without AI.
+% ---------------------------------------------------------------
+\cls{Recording}{dataclass}{core/recorder.py}
+\lbl{What} Everything that happened between two instants: signals, log lines and fault codes.
+\begin{fields}
+id & str & \f{"20261028-233227-f787"}: date, time and 4 random characters. \\
+label & str & human description: \f{"joint 1 (shoulder) +3.0\textdegree"}. \\
+machine & str & \f{"ursim\_ur3"}. \\
+t0, t1 & float & start and end of the window (Unix seconds). \\
+t & np.ndarray & the time of each sample, one row per sample. \\
+channels & dict[str, np.ndarray] & one array per channel, same length as \f{t}; NaN where missing. \\
+logs & list[LogLine] & the log lines inside the window. \\
+faults & list[FaultCode] & the fault codes inside the window. \\
+\end{fields}
+\lbl{Real example} The capture of the protective stop:
+\begin{lstlisting}[style=out]
+Recording(id="20261028-233227-f787", machine="ursim_ur3",
+          t0=1793226730.067, t1=1793226747.068)   # 17.0 s
+len(rec.t)          -> 8187 samples
+len(rec.channels)   -> 63
+rec.duration        -> 17.0     (property: t1 - t0)
+rec.rate_hz         -> 481.6    (property: samples per second)
+rec.channels["safety_mode"] -> array([1., 1., ..., 3., 3.])
+\end{lstlisting}
+Methods:
 \begin{itemize}
-\item \f{EventWatcher.feed(event)}: a fault code always gives an alert; a log line containing
-``protective stop'', ``emergency stop'', ``lost communication'', ``connection lost'',
-``fault'' (as a whole word, so ``default'' does not match), ``collision'' or ``overcurrent''
-gives a critical alert; any ERROR line gives a warning. The same reason is reported at most
-once every 30\,s, so a repeating failure does not flood the operator.
-\item \f{stream\_gaps(recording)}: the holes longer than 0.1\,s in the signal stream,
-including a stream that stops for good before the end of the window.
+\item \f{resample(hz, channels)}: averages groups of samples to get fewer points.
+\f{rec.resample(10, ["safety\_mode"])} gives 170 points instead of 8187. Averaging, rather than
+keeping one sample in 50, keeps the trace of a short peak.
+\item \f{save(folder)} writes the recording to a file named after its id, ending in
+\f{.json.gz}. \f{Recording.load(path)} reads it back. Compressed JSON: readable by any tool, no extra library.
 \end{itemize}
-This is where the signal rules (b, e, a, c) will go.
+\lbl{Why one class for all sources} A test, a black box and ``the last 30 seconds'' all become
+the same object, so the agent reads them all the same way (summary, plot, table).
+\lbl{Who} Made by \f{Recorder.window}/\f{record} and \f{read\_flight\_report}; consumed by
+\f{Toolbox.describe\_test}, \f{stream\_gaps} and the functions of \f{context.py}.
 
-\filehead{safety.py}{76}
-Every action Claude asks for passes here first. \f{SafetyPolicy.check}:
-\begin{enumerate}
-\item every argument must be present, be a number, and be inside its range; otherwise it is
-refused (never silently clamped) and Claude is told why;
-\item if the action moves the robot: the operator is asked, \emph{every time};
-\item if a PIN is configured: it is asked before the first movement of each investigation.
-\end{enumerate}
+% ---------------------------------------------------------------
+\cls{Recorder}{class}{core/recorder.py}
+\lbl{What} Reads the three streams non-stop in the background and keeps the last two minutes,
+so any time slice can be cut out later.
+\begin{fields}
+connector & Connector & the machine read. \\
+directory & Path & where recordings are saved: \f{data/recordings/}. \\
+\_capacity & int & rows of the ring buffer: 120\,s \(\times\) 500\,Hz = 60\,000. \\
+\_t & np.ndarray & 60\,000 times, one per row. \\
+\_data & np.ndarray & 60\,000 rows \(\times\) one column per channel (63 on URSim). \\
+\_columns & dict[str, int] & channel name \(\to\) column number: \f{\{"joint\_0\_current\_actual": 0, \ldots\}}. \\
+\_count & int & samples received since the start (never reset). \\
+\_logs & deque[LogLine] & last 5\,000 log lines. \\
+\_faults & deque[FaultCode] & last 1\,000 fault codes. \\
+\_subscribers & list[Queue] & mailboxes that get every new event (loop mode). \\
+\_lock & Lock & one thread at a time in the buffers. \\
+\_threads & list[Thread] & the three readers. \\
+\_stopping & Event & raised by \f{stop()}. \\
+errors & dict[str, str] & broken streams and why: \f{\{"signals": "ConnectionError: \ldots"\}}. \\
+\end{fields}
+(A name starting with \f{\_} means ``internal: only this class touches it''.)
+
+\subsubsection*{The ring buffer, explained with 5 rows}
+Imagine a buffer of only 5 rows, and 7 samples \f{s1}\ldots\f{s7} arriving. Each sample goes into
+row \f{count \% 5} (the remainder of the division by 5), then \f{count} grows by one:
+\begin{center}
+\begin{tikzpicture}[cell/.style={draw,minimum width=9mm,minimum height=6mm,font=\footnotesize\ttfamily}]
+\foreach \i/\v in {0/s6,1/s7,2/s3,3/s4,4/s5} {
+  \node[cell,fill=\ifnum\i<2 accent!20\else white\fi] (c\i) at (\i*0.95,0) {\v};
+  \node[font=\scriptsize,color=ink2] at (\i*0.95,0.55) {row \i};
+}
+\draw[-{Stealth},thick,accent] (2*0.95,-0.9) -- (c2.south) node[pos=0,below,font=\scriptsize]{next write: row 7\,\%\,5 = 2};
+\end{tikzpicture}
+\end{center}
+\begin{itemize}
+\item \f{s1}\ldots\f{s5} arrived with \f{count} = 0\ldots4 and filled rows 0--4. \f{s6} arrived
+with \f{count} = 5, so it went to row 5\,\%\,5 = 0; \f{s7} to row 6\,\%\,5 = 1. They overwrote
+\f{s1} and \f{s2}, the oldest. \f{count} is now 7.
+\item Nothing is ever moved or deleted: writing a sample is one assignment, whatever the size.
+\item To read in time order, \f{window()} starts at the oldest row, \f{count \% 5} = 2, and wraps
+around: rows 2, 3, 4, 0, 1 \(\to\) \f{s3 s4 s5 s6 s7}.
+\end{itemize}
+The real buffer works the same with 60\,000 rows. When a sample brings a channel name never seen
+before, a new column full of NaN is added on the right and its number is stored in
+\f{\_columns}.
+
 \begin{why}
-Even if Claude makes a mistake or is manipulated by a strange log line, the robot cannot leave
-limits fixed in advance by humans. Claude only sees ``REFUSED: \ldots'' and has to adapt.
+\textbf{Why a numpy ring buffer and not a Python list of \f{Sample}s?} Measured on this laptop for
+120\,s of URSim data (60\,000 samples \(\times\) 63 channels): \textbf{30\,MB} as one numpy
+array, \textbf{about 190\,MB} as Python objects. A Raspberry Pi has 1 to 8\,GB, shared with
+everything else. And a list would grow forever unless we deleted old items, which is slow; the
+ring overwrites them for free.
 \end{why}
 
-% ---------------------------------------------------------------------------------------------
+\subsubsection*{The methods, and who calls them}
+\begin{itemize}
+\item \f{start()}: starts the three reader threads. Each one loops: read the stream; if it
+breaks, note the cause in \f{errors}, wait 1\,s, reconnect. Called once by \f{build\_runtime}.
+\item \f{window(t0, t1)} \(\to\) \f{Recording}: copies the rows whose time is between \f{t0}
+and \f{t1}, plus the log lines and fault codes of that period. Channels that stayed empty are
+left out.
+\item \f{latest(seconds)}: \f{window(now - seconds, now)}. Used by \f{get\_recent\_logs},
+\f{get\_recent\_faults} and \f{health}.
+\item \f{record(action, label)}: notes the time minus 1\,s, runs the test, waits 1.5\,s, cuts the
+window and saves it. Because the buffer was already filling, the second \emph{before} the test
+is there too. Used by \f{Toolbox} for every test.
+\item \f{subscribe()} \(\to\) \f{Queue}: a mailbox that receives every new log line and fault code.
+Used by the loop mode and the benchmarks.
+\item \f{stop()}: raises \f{\_stopping}; each thread ends at its next item.
+\end{itemize}
+
+\begin{careful}
+\textbf{Why \f{stop()} exists.} During the fault captures, each run created a recorder and never
+stopped it. From round 4 on, the old recorders' connections were still open, and they added
+cuts and warnings to unrelated faults. \f{stop()} fixed it, a test checks it, and all 65
+captures were redone.
+\end{careful}
+
+% =============================================================================================
+\section{The rules without AI: \f{core/checks.py}}
+\filehead{checks.py}{87}
+
+\cls{EventWatcher}{class}{core/checks.py}
+\lbl{What} Looks at each new log line or fault code, one at a time, and decides: alert or not.
+\begin{fields}
+cooldown\_s & float & minimum time between two alerts with the same reason: 30\,s. \\
+\_patterns & list[re.Pattern] & the 7 phrases below, compiled once (case ignored). \\
+\_last & dict[str, float] & reason \(\to\) time of its last alert: \f{\{"error in the log (polyscope)": 1793226737.1\}}. \\
+\end{fields}
+\lbl{The rules} The one method, \f{feed(event)}, returns an \f{Alert} or \f{None}. In this order:
+\begin{enumerate}
+\item The event is a \f{FaultCode} \(\to\) alert, reason \f{"fault code C\ldots"}; \f{critical} if
+the code's level is \f{ERROR}/\f{FATAL}, otherwise \f{warning}.
+\item The text contains one of the 7 \textbf{critical phrases} \(\to\) \f{critical} alert, reason
+\f{"log: "} + the text: \emph{protective stop, emergency stop, lost communication, connection
+lost/refused/reset, fault} (as a whole word: ``default'' does not match), \emph{collision},
+\emph{overcurrent}.
+\item The line's level is \f{ERROR} or \f{FATAL} \(\to\) \f{warning} alert, reason
+\f{"error in the log (}\emph{source}\f{)"}.
+\item Anything else (INFO, DEBUG, WARNING without a critical phrase) \(\to\) no alert.
+\end{enumerate}
+Then the \textbf{repeat filter}: if the same reason gave an alert less than 30\,s ago, the new
+one is dropped.
+
+\lbl{Real runs} Each capture's events fed, in order, to a fresh \f{EventWatcher}:
+\begin{center}\footnotesize
+\begin{tabularx}{\linewidth}{@{}l r X@{}}
+\toprule
+\textbf{Fault} & \textbf{Events} & \textbf{Alerts produced} \\
+\midrule
+protective stop & 23 & \emph{warning} fault code C209A0 \newline \emph{critical} log: Protective stop. Error code: C209A0 \newline \emph{warning} error in the log (polyscope): File attachment not found \\
+invalid program & 7 & \emph{warning} error in the log (controller): RuntimeException: Syntax error\ldots \\
+disk full & 33 & \emph{warning} fault code C209A0 (the probe) \newline \emph{warning} error in the log (polyscope): Could not write to FlightRecord zip file \\
+network cut & 62 & \emph{warning} error in the log (polyscope): ControllerSocket: 3 consecutive read timeouts \\
+\bottomrule
+\end{tabularx}
+\end{center}
+What the examples show:
+\begin{itemize}
+\item \textbf{The repeat filter at work.} The invalid program wrote 2 ERROR lines, the disk full
+wrote 20 (a Java error and its stack trace, one line each): each gave \emph{one} alert, because
+they share the reason \f{"error in the log (\ldots)"}.
+\item \textbf{A WARNING is not enough.} Before disconnecting, PolyScope wrote \f{WARNING
+Controller monitoring timed out too many times}. No critical phrase, not an ERROR: no alert.
+The alert came 10\,s later with the ERROR line.
+\item \textbf{The fault code comes as a warning}, because URSim sends \f{C209A0} at level
+\f{WARNING}; the \emph{log line} about the same event is what makes it critical.
+\end{itemize}
+\lbl{Who} Created by \f{build\_graph}; fed by the \f{watch} step with each event from
+\f{Recorder.subscribe()}.
+
+\subsubsection*{The function \f{stream\_gaps(recording, max\_gap\_s=0.1)}}
+Not a class: a function returning \f{list[tuple[float, float]]}, the holes longer than 0.1\,s in
+the signal stream, each as \f{(start, duration)} in seconds from the window start.
+\begin{itemize}
+\item How: it puts the window start before the sample times and the window end after them,
+computes the differences between neighbours, and keeps those above 0.1\,s. At 500\,Hz the normal
+difference is 0.002\,s.
+\item Why the window edges: if the stream stops for good, there is no ``next sample'' to make a
+difference with; the end of the window plays that role.
+\item Real values from the captures: network cut \f{[(0.012, 15.206)]}, the stream stopped
+0.012\,s after the fault and never came back; controller frozen \f{[(0.013, 9.01)]}, a 9\,s hole
+then the stream resumed; CPU starvation \f{[(3.219, 0.1), (5.919, 0.1)]}, many short holes.
+\end{itemize}
+Used by \f{Toolbox.describe\_test} (``Signal stream cuts: \ldots'') and by the capture tool.
+
+% =============================================================================================
+\section{Safety: \f{core/safety.py}}
+\filehead{safety.py}{76}
+
+\cls{SafetyRefusal}{exception class}{core/safety.py}
+\lbl{What} The error raised when an action is refused. Its message goes back to Claude word for
+word, so Claude knows why and can change plan.
+
+\cls{SafetyPolicy}{dataclass}{core/safety.py}
+\lbl{What} Decides whether a robot action may run.
+\begin{fields}
+ask\_operator & Callable[[str], bool] & asks a yes/no question; in practice \f{CLI.confirm}. \\
+pin & str & the operator PIN, \f{""} for none. Never logged. \\
+ask\_pin & Callable[[], str] | None & asks for the PIN; in practice \f{CLI.ask\_pin}. \\
+\_pin\_given & bool & the PIN was already given in this investigation. \\
+\end{fields}
+\lbl{Real outputs} \f{check(spec, args)} on \f{joint\_test}:
+\begin{lstlisting}[style=out]
+args {"joint": 1, "delta_deg": 30}
+  -> REFUSED: joint_test: delta_deg=30.0 outside the allowed range [-5, 5]
+args {"joint": 1}
+  -> REFUSED: joint_test: argument delta_deg is required
+args {"joint": 1, "delta_deg": 3}
+  -> asks: "The agent wants to run joint_test(joint=1, delta_deg=3). Allow?"
+     operator says no -> REFUSED: the operator refused this test; try another
+                         lead or conclude with the data you have
+\end{lstlisting}
+\begin{why}
+\textbf{Why functions as fields (\f{Callable})?} The policy does not know how to ask: in the
+terminal it is \f{input()}, in the tests it is \f{SilentHMI.confirm} that answers ``yes'' or
+``no'' instantly, later it could be a web button. Passing the function in keeps
+\f{SafetyPolicy} identical in all cases.
+
+\textbf{Why refuse rather than clamp?} If Claude asks for 30° and silently gets 5°, its reasoning
+is based on a test it did not get. A refusal is honest.
+\end{why}
+\lbl{Who} Created by \f{build\_runtime}; \f{reset()} is called at the start of each investigation;
+\f{check()} is called by \f{Toolbox.execute} before every machine action.
+
+% =============================================================================================
 \section{The URSim connector: \f{connectors/ursim.py}}
 \filehead{ursim.py}{672}
-The biggest file, on purpose: it is the only place that knows the Universal Robots formats
-(your decision: one file). It reads in order, top to bottom.
+The biggest file, on purpose: the only place that knows the Universal Robots formats (your
+decision: one file). Two classes and six functions.
 
 \subsection{The robot's doors (network ports)}
 \begin{center}\small
@@ -333,286 +808,424 @@ The biggest file, on purpose: it is the only place that knows the Universal Robo
 \toprule
 \textbf{Port} & \textbf{Name} & \textbf{What we do with it} \\
 \midrule
-30003 & Real-Time & Read the signals: one binary packet every 2\,ms (500\,Hz). \\
-30001 & Primary & Read the fault codes (``Robot Message'' packets). \\
-30002 & Secondary & Send URScript programs (the robot's language) for the tests. \\
-29999 & Dashboard & Text commands: robot mode, safety status, power on, unlock a protective stop. \\
+30003 & Real-Time & Read the signals: one binary packet every 2\,ms. \\
+30001 & Primary & Read the fault codes. \\
+30002 & Secondary & Send URScript programs for the tests. \\
+29999 & Dashboard & Text commands: mode, safety status, power on, unlock. \\
 \bottomrule
 \end{tabularx}
 \end{center}
 
-\subsection{Reading the signals}
-\f{\_packets} splits the byte stream into packets (each starts with its own size).
-\f{parse\_realtime} reads, at fixed positions in the packet (the table \f{REALTIME\_FIELDS},
-from the official ``Remote Control via TCP/IP'' document), 16 groups of values: target and
-actual joint positions, speeds, currents, target torques, hand pose and force, motor
-temperatures, robot mode, safety mode, accelerometer, speed scaling, voltages. Each becomes a
-named channel such as \f{joint\_1\_current\_actual}.
+\subsection{The functions}
+\textbf{\f{parse\_realtime(packet: bytes, t: float) -> Sample}}. A Real-Time packet is 1\,000+
+bytes of numbers with no names. The table \f{REALTIME\_FIELDS} (from the official ``Remote Control
+via TCP/IP'' document) says where each group sits. One entry:
+\begin{lstlisting}
+"q_actual": (252, 6, ["joint_0_q_actual", ..., "joint_5_q_actual"]),
+# bytes 252 to 299: 6 numbers of 8 bytes (big-endian doubles), one per joint
+\end{lstlisting}
+16 entries give the 63 channels. A field beyond the end of a shorter packet (older controller)
+is skipped instead of crashing.
 
-\subsection{Reading the fault codes}
-\f{parse\_primary} decodes three message types: error codes, ``key'' messages at level ERROR or
-above, and runtime exceptions of a program. A code is written as on the robot's tablet:
-\f{C209A0} (code 209, argument 0). Messages replayed by the controller during the first second
-of a connection are skipped (they are old).
+\textbf{\f{parse\_primary(packet, t) -> FaultCode | None}}. Most Primary packets are robot
+state; only ``Robot Message'' packets (type 20) can be faults. It reads the code, argument and
+level numbers and builds \f{C209A0}. Returns \f{None} for everything else.
 
-\subsection{Reading the logs}
-There are three log files inside the container: the controller's (\f{URControl.log}), the user
-interface's (\f{polyscope.log}) and the teach pendant's event list (\f{log\_history.txt}, what a
-technician sees on the tablet). \f{logs()} runs \f{tail -F} on the three through
-\f{docker exec}, the way one would read them over SSH on a real controller.
+\textbf{\f{parse\_log\_line(line, previous) -> LogLine | None}}. Shown with real examples in the
+\f{LogLine} section. It recognises the file from the date format (\f{2026-10-28\_23:\ldots} =
+controller, \f{2026-10-28 23:\ldots} = PolyScope, \f{3.5 ::} = pendant). A line in no format
+(a Java stack trace line) continues the previous message and inherits its level and source:
+that is why \f{previous} is passed in. Connections of clients (ours included) are demoted to
+\f{DEBUG} so they never raise an alert.
 
-\f{parse\_log\_line} recognises the file from the line's date format, removes colour codes and
-NUL characters, extracts the level, keeps multi-line Java messages together, and demotes the
-noise of client connections (including ours) to DEBUG so it never raises an alert.
+\textbf{\f{read\_flight\_report(path, machine) -> Recording}}. Opens a black box zip
+(\f{metadata.json}, \f{summary.log}, \f{files/realtimedata.csv} with 15\,000 rows \(\times\) 181
+columns, logs). Column names are renamed to the live names
+(\f{"Actual Current [A] J1"} \(\to\) \f{joint\_1\_current\_actual},
+\f{"Target Current [A] J1"} \(\to\) \f{joint\_1\_current\_target}) so Claude compares like with
+like. The time column is the controller's uptime; the last row is aligned on the ``Reporting
+Time'' of \f{summary.log}.
 
-\begin{careful}
-A trap found during the study: killing our \f{docker exec} did not stop the \f{tail} inside the
-container. The fix: \f{tail} runs in the background of a small shell that waits on our input;
-when we stop, the input closes and the shell kills \f{tail}.
-\end{careful}
+\textbf{\f{send\_script(host, script)}}. Sends URScript to port 30002. Several lines are wrapped in
+\f{def robot\_agentic(): \ldots\ end}, the only form the controller runs as a program.
 
-\subsection{The black boxes}
-On every error, the robot writes a ``flight report'': a zip with about 30\,s of its own data at
-500\,Hz (181 columns, more than the live stream: \emph{target current}, deviation ratios,
-payload), and its logs. \f{read\_flight\_report} turns it into a normal \f{Recording}, renaming
-columns to the live-stream names so Claude compares like with like, and aligning the time on the
-report's ``Reporting Time''. The tool \f{get\_flight\_report(index)} copies one out of the
-container; an unreadable one (e.g.\ written on a full disk) gives a clear message instead of a
-crash.
+\textbf{\f{line\_time(line) -> float | None}}. The date at the start of a log line, as Unix
+seconds. Used for black boxes and by the capture tool.
 
-\subsection{The tests offered to Claude}
-\begin{center}\small
+% ---------------------------------------------------------------
+\cls{Dashboard}{class}{connectors/ursim.py}
+\lbl{What} A small client for port 29999, where you type text commands and get text answers.
+\begin{fields}
+host & str & \f{"127.0.0.1"}. \\
+timeout & float & 5\,s to connect and answer. \\
+\end{fields}
+\lbl{Example}
+\begin{lstlisting}[style=out]
+dashboard.send("robotmode")      -> "Robotmode: RUNNING"
+dashboard.robot_mode()           -> "RUNNING"
+dashboard.safety_status()        -> "PROTECTIVE_STOP"   (after the fault)
+dashboard.power_on_and_release() -> "RUNNING"   (closes popups, unlocks,
+                                                  powers on, releases brakes)
+\end{lstlisting}
+\lbl{Why a class} It hides the connection details and the answer prefixes. Each command opens its
+own connection: a few ms more, but nothing to repair after a controller restart, which happens
+all the time during fault injection.
+\lbl{Who} \f{URSimConnector} (end of tests, state, recovery) and \f{URSimFaults} (repairs).
+
+% ---------------------------------------------------------------
+\cls{URSimConnector}{class, implements Connector}{connectors/ursim.py}
+\lbl{What} The UR3e robot simulated by URSim, as the rest of the code sees it.
+\begin{fields}
+name & str & \f{"ursim\_ur3"}, written in reports and recordings. \\
+host & str & controller address, \f{"127.0.0.1"}. \\
+container & str & Docker container name, \f{"ursim"}, to read the logs. \\
+manuals\_dir & Path & \f{manuals/ursim/}. \\
+dashboard & Dashboard & its Dashboard client. \\
+\_payload\_offset\_kg & float & extra payload left declared by an interrupted \f{add\_load}; normally 0. \\
+\end{fields}
+\lbl{The six tests} (\f{tools()} returns them as \f{ToolSpec}s)
+\begin{center}\footnotesize
 \begin{tabularx}{\linewidth}{@{}>{\ttfamily}l X@{}}
 \toprule
-joint\_test & One joint turns ±5° max at 10\,\% speed, and comes back. \\
-move\_hand & The hand moves ±2\,cm max in a straight line, and comes back. \\
-add\_load & Declares up to 1.5\,kg more payload, repeats a shoulder test, restores the original payload (even after an interruption, through \f{recover\_robot}). \\
-overall\_test & Each joint in turn, 1--5°: compare the joints with each other. \\
-recover\_robot & Close popups, unlock a protective stop, power on, release brakes. \\
-get\_flight\_report & Open a black box. Does not move the robot. \\
+joint\_test & one joint ±5° max at 10\,\% speed, and back. \\
+move\_hand & the hand ±2\,cm max in a straight line, and back. \\
+add\_load & +0 to 1.5\,kg declared payload, shoulder test, original payload restored. \\
+overall\_test & each joint in turn, 1--5°. \\
+recover\_robot & close popups, unlock, power on, release brakes. \\
+get\_flight\_report & open black box number \f{index} (0 = newest). Moves nothing. \\
 \bottomrule
 \end{tabularx}
 \end{center}
-Each test is written in URScript (\f{send\_script}), started, and its end is detected by asking
-the Dashboard ``running?'' every 0.1\,s (60\,s timeout, then an emergency \f{stopj}).
+\lbl{Example: \f{\_payload\_offset\_kg}} Claude runs \f{add\_load(kg=1)}. The program declares
++1\,kg, but a protective stop interrupts it before the line that restores the payload. The
+connector notes \f{\_payload\_offset\_kg = 1.0} and tells Claude ``\emph{the extra 1 kg payload is
+still declared, recover\_robot will remove it}''. When Claude calls \f{recover\_robot}, the
+connector subtracts the 1\,kg. Without this field, our own test would leave a wrong payload: the
+very fault we look for.
+\lbl{Who} Created by \f{build\_runtime} when \f{CONNECTOR=ursim}.
 
-\begin{why}
-\textbf{Why does \f{add\_load} read and restore the payload?} A wrong payload declaration may be
-the very fault under investigation. Overwriting it with a fixed value would erase the evidence.
-\end{why}
+\begin{careful}
+\textbf{A trap found on the real simulator.} Stopping our \f{docker exec} did not stop the
+\f{tail} it had started inside the container. Now \f{tail} runs in the background of a small
+shell that waits on our input; when we stop, the input closes and the shell kills \f{tail}.
+\end{careful}
 
+% ---------------------------------------------------------------
+\cls{FakeConnector}{class, implements Connector}{connectors/fake.py}
 \filehead{fake.py}{136}
-A fake six-joint arm in pure Python (100\,Hz), used by the tests: realistic currents (gravity +
-speed \(\times\) friction), one \f{joint\_test}, and \f{inject("friction")} or
-\f{inject("fault")} to simulate a problem. Fast, free and reproducible.
+\lbl{What} A fake six-joint arm in pure Python, for the tests.
+\begin{fields}
+q & list[float] & joint positions (rad), starts at \f{[0, -1.57, 1.57, -1.57, -1.57, 0]}. \\
+qd & list[float] & joint speeds (rad/s). \\
+friction & list[float] & effort factor per joint, 1.0 = healthy. \\
+log\_q, fault\_q & Queue & lines and codes waiting to be read by the streams. \\
+calls & list[tuple[str, dict]] & every action received, to check in the tests. \\
+\end{fields}
+\lbl{Example (a real test)} \f{fake.inject("friction", joint=2, factor=1.6)} raises joint 2's
+effort and logs \f{WARNING Joint 2: high following error}. The fake Claude asks
+\f{joint\_test(joint=2, delta\_deg=5)}; the test checks that Claude received a text, an image and a
+table with \f{joint\_2\_current\_actual} and more than 50 rows.
+\lbl{Why} URSim takes a minute to start and needs Docker. The fake arm runs the 24 tests in
+seconds, anywhere, with the same contract.
 
-% ---------------------------------------------------------------------------------------------
+% =============================================================================================
 \section{The agent: \f{src/robot\_agentic/agent/}}
 
+% ---------------------------------------------------------------
+\cls{State}{TypedDict}{agent/graph.py}
 \filehead{graph.py}{251}
-The course of an investigation, as a LangGraph graph with four steps:
+\lbl{What} What the steps of the graph pass to each other.
+\begin{fields}
+mode & str & \f{"loop"} or \f{"check"}. \\
+alert & Alert | None & the alert that woke the agent (None in check mode). \\
+approved & bool & the operator's answer. \\
+request & str | None & the operator's question in check mode. \\
+report & dict | None & the report from \f{submit\_report}. \\
+report\_path & str & where it was saved. \\
+turns & int & number of calls to Claude. \\
+error & str | None & why it ended without a report, e.g.\ \f{"maximum number of turns reached"}. \\
+\end{fields}
+\lbl{The graph} \f{build\_graph} creates four steps and the arrows between them:
 \begin{center}\small
 \f{watch} \(\xrightarrow{\text{alert}}\) \f{ask\_approval} \(\xrightarrow{\text{yes}}\) \f{investigate} \(\to\) \f{report}
 \end{center}
-\f{investigate} is the heart: the conversation with Claude. At each turn Claude answers with
-thinking, text and tool calls; the tools run; their results are added; and again, until
-\f{submit\_report} or 25 turns. If Claude answers without any tool, it is reminded to conclude.
-A failing tool returns its error to Claude instead of crashing the investigation.
-
+Each step is a function that receives the \f{State} and returns the keys it changes, e.g.\
+\f{ask\_approval} returns \f{\{"approved": True\}}. \f{investigate} is the conversation with
+Claude: send, run the requested tools, add their results, send again, until \f{submit\_report}
+or 25 turns. A failing tool returns its error to Claude instead of crashing.
 \begin{why}
-\textbf{The conversation is only ever extended, never edited.} This is what makes prompt
-caching work (each turn only pays full price for its new part) and keeps Claude's reasoning
-from one turn to the next.
+\textbf{The conversation is only ever extended, never edited.} This is what makes prompt caching
+work (each turn pays full price only for its new part) and keeps Claude's reasoning between turns.
 \end{why}
-\f{run\_check} and \f{run\_loop} are the two modes of section 3.
+\f{run\_check} and \f{run\_loop} are the two modes; \f{run\_loop} repeats the graph forever and
+drops the events received during an investigation (mostly caused by the agent's own tests).
 
+% ---------------------------------------------------------------
+\cls{Toolbox}{class}{agent/tools.py}
 \filehead{tools.py}{239}
-The \f{Toolbox}: the list of tools Claude can call and the code that runs them.
-\begin{itemize}
-\item Common tools (any machine): \f{get\_status}, \f{get\_recent\_logs}, \f{get\_recent\_faults},
-\f{search\_docs}, \f{get\_recording} (a recording as a table, or \f{"latest:N"} for the last
-N seconds), \f{plot\_recording}, \f{submit\_report}.
-\item Machine tools come from the connector and always go through the safety layer.
-\item \f{submit\_report} uses a strict JSON schema: root cause, confidence, evidence, repair,
-references, tests done. Claude cannot hand in a report with a field missing.
-\item \f{describe\_test}: what Claude gets after each test (summary + plot + full table).
-\end{itemize}
+\lbl{What} The list of tools Claude can call, and the code that runs them.
+\begin{fields}
+connector & Connector & the machine. \\
+recorder & Recorder & the memory. \\
+safety & SafetyPolicy & the gate. \\
+budget & int & tokens allowed for one table of values: 40\,000. \\
+machine\_tools & dict[str, ToolSpec] & the connector's tests by name. \\
+docs & DocSearch | None & the documentation index (None if no document). \\
+report & dict | None & filled by \f{submit\_report}; the graph watches it to stop. \\
+used\_recordings & list[str] & ids of the recordings made, saved in the report. \\
+\end{fields}
+\lbl{Its tools} Common ones: \f{get\_status}, \f{get\_recent\_logs(seconds, min\_level)},
+\f{get\_recent\_faults(seconds)}, \f{search\_docs(query)},
+\f{get\_recording(recording\_id, channels, hz)} (\f{"latest:30"} = the last 30\,s),
+\f{plot\_recording}, \f{submit\_report}; plus the connector's six.
+\lbl{Example: one test} What happens when Claude asks for a test, i.e.\
+\f{execute("joint\_test", \{"joint": 1, "delta\_deg": 3\})}:
+\begin{enumerate}
+\item \f{joint\_test} is a machine tool \(\to\) \f{safety.check} (bounds, operator, PIN).
+\item It moves the machine \(\to\) \f{recorder.record(\ldots)} runs it and returns a \f{Recording}.
+\item The id is added to \f{used\_recordings}.
+\item \f{describe\_test} builds the answer: three blocks, (1) a text in this format:
+``\emph{Recording <id> (<duration> s, <points> points at <rate> Hz): joint 1 (shoulder) +3.0°:
+finished; mode <mode>, safety <status>}'', followed by any cuts, fault codes and log warnings; (2) a PNG plot of the 6 channels that moved most; (3) the
+table of every channel that varied.
+\end{enumerate}
+\f{submit\_report} has a strict schema: \f{root\_cause}, \f{confidence} (low, medium or high),
+\f{evidence}, \f{repair}, \f{references}, \f{tests\_done}. Claude cannot hand in a report with a
+field missing.
+\lbl{Why} One object gathers everything a tool needs, so the graph just says
+\f{toolbox.execute(name, args)} and never cares which tool it is.
 
+% ---------------------------------------------------------------
+\subsection*{The functions of \f{context.py}}
 \filehead{context.py}{113}
-How a recording is shown to Claude without exceeding the budget (\f{RECORDING\_TOKEN\_BUDGET},
-40\,000 tokens by default).
+How a \f{Recording} is shown to Claude within the token budget.
 \begin{itemize}
-\item \f{moving\_channels}: the channels that vary, ranked by how much (range divided by
-size, so radians, amperes and degrees can be compared). Constant channels are left out.
-\item \f{plot}: up to 8 channels, one per row, as a PNG.
-\item \f{csv\_within\_budget}: the table at the finest rate that fits; the rate is halved until
-it fits. A 5\,s test at 500\,Hz on 63 channels is 160\,000 numbers, far too many.
+\item \f{moving\_channels(rec) -> list[str]}: the channels that vary, those that vary most
+first; constant ones are dropped. On the protective stop recording (robot at rest), only 2 of 63
+channels varied: \f{["speed\_scaling", "safety\_mode"]}. That is exactly the story of the fault.
+\item \f{csv\_within\_budget(rec, channels, budget) -> (text, rate)}: starts at full rate and
+halves it until the table fits. Real result on the same recording:
+\begin{lstlisting}[style=out]
+rate 481.6 Hz, about 32,799 tokens (fits in 40,000)
+t_s,speed_scaling,safety_mode
+0.001,0,1
+0.003,0,1
+\end{lstlisting}
+\item \f{plot(rec, channels)}: up to 8 channels, one per row, as a PNG in memory.
 \end{itemize}
 \begin{why}
-\textbf{Why a plot \emph{and} a table?} Research (Zhou \& Yu, ICLR 2025) shows LLMs spot
-anomalies in time series better on an image than in a list of numbers. The table keeps the exact
-values for checking. You chose to give both.
+\textbf{Why a plot \emph{and} a table?} Research (Zhou \& Yu, ICLR 2025) shows LLMs spot anomalies
+in time series better on an image than in a list of numbers. The table keeps the exact values.
+You chose to give both.
 \end{why}
 
+% ---------------------------------------------------------------
+\cls{LLM}{Protocol}{agent/llm.py}
 \filehead{llm.py}{141}
-\f{ClaudeClient.create}: one call to Claude Opus 5.5 with
-\begin{itemize}
-\item \textbf{adaptive thinking} (Claude decides how much to think; a summary is shown in grey);
-\item \textbf{effort high} (your choice: a diagnosis needs rigour);
-\item \textbf{prompt caching}: a cache point on the system prompt plus automatic caching of the
-conversation, so a 20-turn investigation does not pay 20 times for the same history;
-\item \textbf{server fallback}: if the model declines, another model answers, and a warning says so.
-\end{itemize}
-Each call is appended to \f{data/llm\_calls.jsonl} with its tokens, cost and duration.
-\f{cost\_usd} computes the price from the public rates (\$4 / \$20 per million input / output
-tokens for Opus 5.5).
+\lbl{What} ``Anything with a \f{create(system, messages, tools)} method that returns an object with
+\f{content} and \f{stop\_reason}.'' The graph only knows this.
+\lbl{Why} The tests pass a \f{ScriptedLLM} that replays prepared answers: no network, no cost, same
+result every time.
+
+\cls{Usage}{dataclass}{agent/llm.py}
+\lbl{What} Running totals of one client's calls.
+\begin{fields}
+calls & int & number of calls. \\
+input\_tokens & int & tokens sent at full price (including cache writes). \\
+output\_tokens & int & tokens written by Claude (thinking included). \\
+cache\_read\_tokens & int & tokens re-read from the cache, 20 times cheaper. \\
+cost\_usd & float & estimated dollars. \\
+\end{fields}
+Printed at the end of every command, in this format: ``\emph{Claude calls: <n>, <n> input
+tokens, <n> output, \(\approx\)\$<cost>}''.
+
+\cls{ClaudeClient}{class, satisfies LLM}{agent/llm.py}
+\begin{fields}
+client & anthropic.\allowbreak Anthropic & the official SDK client. \\
+model & str & \f{"claude-opus-5-5"}. \\
+effort & str & \f{"high"} (your choice). \\
+log\_path & Path | None & \f{data/llm\_calls.jsonl}. \\
+usage & Usage & the totals. \\
+\end{fields}
+\lbl{What \f{create} sends} adaptive thinking (Claude decides how much to think, a summary is
+shown), effort high, a cache point on the system prompt plus automatic caching of the
+conversation, and a server fallback model if the main one declines. After each call it adds one
+line to \f{llm\_calls.jsonl}: tokens, cost, duration.
+\lbl{Cost example} \f{cost\_usd} with the Opus 5.5 prices (\$4 in, \$20 out, \$0.20 cache read
+per million tokens): a turn with 2\,000 new input tokens, 30\,000 read from cache and 1\,500
+output costs \(2000\times4 + 30000\times0.2 + 1500\times20 = 44\,000\) millionths of a dollar,
+\textbf{\$0.044}. Without the cache, the 30\,000 tokens alone would cost \$0.12.
 
 \filehead{prompts/system.md}{27}
-The agent's instructions, in plain English: what it has (four sources, tests, black boxes), the
-method (facts \(\to\) ranked hypotheses \(\to\) the smallest test that separates them \(\to\)
-conclude), and the rules (no repeating a refused test, check one sensor against another, a
-communication failure is a root cause in itself, quote every claim).
+The agent's instructions, in plain English: what it has, the method (facts \(\to\) ranked
+hypotheses \(\to\) the smallest test that separates them \(\to\) conclude), the rules.
 
-% ---------------------------------------------------------------------------------------------
+% =============================================================================================
 \section{Around the agent}
 
-\filehead{\_\_main\_\_.py}{141}
-The \f{robot-agentic} command: \f{build\_runtime} assembles everything (also used by the
-benchmarks), \f{health} runs the checklist, \f{main} reads the command line. Ctrl+C stops the
-robot's movement before exiting, and the total Claude cost is always printed.
-
-\filehead{config.py}{82}
-\f{Settings}: robot address, container name, model, token budget, PIN, log level, folders. Each
-field is read from the environment variable of the same name in capitals (\f{ROBOT\_HOST}\ldots),
-or from \f{.env}. \f{setup\_logging}: everything goes to \f{data/robot\_agentic.log}, only
-warnings to the terminal.
-
-\filehead{hmi.py}{77}
-The terminal interface (the only file allowed to \f{print}): alerts in red, questions
-\f{[y/N]}, the PIN typed without being shown, tool calls in blue, the report. \f{--yes}
-answers yes automatically (simulator and benchmarks only).
-
+\cls{Passage}{dataclass}{docs.py}
 \filehead{docs.py}{150}
-The documentation search.
-\begin{itemize}
-\item \f{build} cuts each document (PDF, HTML, Markdown, text) into passages of about 1\,500
-characters. A Markdown heading always starts a new passage, and long sections repeat their
-heading and source address, so every passage can be quoted with its origin. The result is
-cached and rebuilt only when a file changes.
-\item \f{DocSearch} ranks passages with \textbf{BM25}, the formula of classic search engines:
-rare words that appear often in a short passage score high. A code like \f{C204A3} is also
-searched as \f{C204}.
-\end{itemize}
-Today's documentation: the 225 official UR error code pages (software 5.26), downloaded by
-\f{tools/fetch\_ur\_docs.py}, each with its web address.
+\lbl{What} An extract of a document, about 1\,500 characters.
+\begin{fields}
+source & str & file path: \f{manuals/ursim/ur\_error\_codes\_SW5\_26.md}. \\
+page & int | None & page number for PDFs, None for text files. \\
+text & str & the extract. \\
+\end{fields}
+\f{cite()} gives the reference to quote: \f{"ur\_error\_codes\_SW5\_26.md"} or
+\f{"service\_manual.pdf, p. 12"}.
 
-% ---------------------------------------------------------------------------------------------
+\cls{DocSearch}{class}{docs.py}
+\lbl{What} Ranks passages for a question with BM25, the formula of classic search engines: a word
+scores high when it is rare in the whole documentation and frequent in a short passage.
+\begin{fields}
+passages & list[Passage] & 280 passages today (225 error codes, some split). \\
+docs & list[Counter] & the words of each passage, counted. \\
+lengths & list[int] & words per passage. \\
+idf & dict[str, float] & how rare each word is. \\
+k1, b & float & the two standard BM25 settings (1.5, 0.75). \\
+\end{fields}
+\lbl{Real example} \f{search("C209A0 protective stop", k=2)}:
+\begin{lstlisting}[style=out]
+19.38  ## C209 A protective stop was triggered (for test purposes only)
+       Source: https://www.universal-robots.com/manuals/EN/HTML/SW5_26/
+               Content/prod-err-codes/topics/CODE_209.html
+10.65  ## C162 The protective stop was likely caused by incorrectly specified
+       payload mass and/or center of gravity.
+\end{lstlisting}
+\f{tokenize("Fault C204A3 on joint")} gives \f{["fault", "c204a3", "on", "joint", "c204"]}: the
+short form \f{c204} is added so the code matches its page title.
+\lbl{Who} Built once by \f{Toolbox} from \f{connector.docs()} (cached in \f{data/docs\_index/});
+used by the \f{search\_docs} tool.
+
+\cls{Settings}{dataclass}{config.py}
+\filehead{config.py}{82}
+\lbl{What} The settings of one run. Each field is read from the environment variable of the same
+name in capitals, or from \f{.env}; otherwise the default applies.
+\begin{center}\footnotesize
+\begin{tabularx}{\linewidth}{@{}>{\ttfamily}l>{\ttfamily}l X@{}}
+\toprule
+\textrm{\textbf{Variable}} & \textrm{\textbf{Type}} & \textbf{Default} \\
+\midrule
+CONNECTOR & str & \f{ursim} (or \f{fake}) \\
+ROBOT\_HOST & str & \f{127.0.0.1} \\
+URSIM\_CONTAINER & str & \f{ursim} \\
+CLAUDE\_MODEL & str & \f{claude-opus-5-5} \\
+RECORDING\_TOKEN\_BUDGET & int & 40000 \\
+OPERATOR\_PIN & str & empty (no PIN) \\
+LOG\_LEVEL & str & \f{WARNING} \\
+DATA\_DIR & Path & \f{data} \\
+MANUALS\_DIR & Path & \f{manuals} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+Derived folders: \f{recordings\_dir}, \f{reports\_dir}, \f{llm\_log}, \f{log\_file}, all inside
+\f{data\_dir}, so a test can point everything at a temporary folder with one setting.
+
+\cls{CLI}{class}{hmi.py}
+\filehead{hmi.py}{77}
+\lbl{What} The terminal interface, the only code allowed to \f{print}. One field:
+\f{auto\_approve: bool} (the \f{--yes} option, simulator only). Methods: \f{alert} (red),
+\f{confirm} (\f{[y/N]}, only ``y''/``yes'' mean yes), \f{ask\_pin} (typed without being shown),
+\f{say}, \f{thinking} (grey), \f{tool\_call} (blue), \f{checklist}, \f{report}.
+\lbl{Why} Everything the operator sees goes through one object: a web interface later only has to
+offer the same methods.
+
+\cls{Runtime}{dataclass}{\_\_main\_\_.py}
+\filehead{\_\_main\_\_.py}{141}
+\lbl{What} The assembled system: \f{settings: Settings}, \f{toolbox: Toolbox}, \f{hmi: CLI}.
+\f{build\_runtime()} makes it: connector \(\to\) recorder \(\to\) safety \(\to\) toolbox. The
+command line and the benchmarks both use it, so they run exactly the same system.
+
+% =============================================================================================
 \section{Outside the package: tools, benchmarks, tests}
 
-\subsection{Fault injection: \f{tools/fault\_injection/}}
+\cls{URSimFaults}{class}{tools/fault\_injection/inject.py}
 \filehead{inject.py}{233}
-\f{URSimFaults}: how to provoke and repair each of the 13 faults: wrong payload, invalid
-program, protective stop, controller killed, controller frozen, PolyScope frozen, network cut,
-CPU starvation, CPU overload, network delay, packet loss, port 30003 blocked, disk full.
-\f{wait\_ready} brings the robot back to RUNNING. Usable alone:
-\f{python -m tools.fault\_injection.inject wrong\_payload}.
+\lbl{What} Knows how to provoke and repair the 13 faults.
+\begin{fields}
+host & str & controller address. \\
+container & str & \f{"ursim"}. \\
+freeze\_s & float & how long the ``freeze'' fault lasts: 8\,s. \\
+\end{fields}
+Methods: \f{inject(fault)}, \f{revert(fault)}, \f{wait\_ready()} (back to RUNNING). Example:
+\f{inject("cpu\_starvation")} runs \f{docker update --cpus 0.1 ursim};
+\f{revert("cpu\_starvation")} gives back all the CPUs.
+\lbl{Who} The capture tool, the benchmarks, and you on the command line.
 
 \filehead{capture.py}{207}
-Provokes one fault and saves all the evidence: the raw new log lines (read by byte position
-and filtered by time), fault codes, mode changes, stream cuts and rate, new black boxes,
-Dashboard state, recovery time. One JSON per run in \f{data/catalogue/}. \f{--repeat 5} for
-five runs.
+Functions only: \f{capture(fault, seconds, out\_dir)} provokes one fault and saves everything
+(raw new log lines, fault codes, mode changes, cuts, black boxes, recovery time) in one JSON
+per run in \f{data/catalogue/}.
 
-\filehead{catalogue.py + catalogue.yaml + catalogue\_template.tex}{234 + 143 + 79}
-Builds the fault catalogue PDF. The rule: \emph{nothing observed is written by hand}.
-\f{catalogue.yaml} holds only the commands and the verified official sources;
-\f{catalogue.py} computes the observed columns from the captures (with ``5/5''-style run
-counts) and fills the LaTeX template.
+\filehead{catalogue.py + catalogue.yaml + template}{234 + 143 + 79}
+Builds the fault catalogue PDF; nothing observed is written by hand.
 
-\filehead{netem/Dockerfile}{4}
-The Alpine helper image for network faults.
+\filehead{benchmarks/run.py}{148}
+For each scenario of \f{scenarios.yaml}: repair, inject, run the agent, grade the root cause by
+keywords and by a Claude judge (\f{judge()} returns \f{(correct: bool, reason: str, cost: float)}),
+repair. Saves the results in \f{benchmarks/results/}.
 
-\filehead{scenarios.yaml}{43}
-The benchmark scenarios: a fault, the mode (loop or check), and the expected answer (a
-sentence for the judge, keyword groups).
+\subsection*{The test doubles: \f{tests/conftest.py}}
+\cls{SilentHMI}{dataclass}{tests/conftest.py}
+Replaces \f{CLI}: \f{approve: bool} decides every answer, \f{log: list[str]} notes everything
+``shown''. A test sets \f{approve=False} to check that a refused movement never reaches the robot.
 
-\filehead{tools/fetch\_ur\_docs.py}{83}
-Downloads the official error code pages into \f{manuals/ursim/}.
+\cls{ScriptedLLM}{class, satisfies LLM}{tests/conftest.py}
+Replaces Claude: \f{turns} is the list of tool calls to make at each turn; \f{requests} keeps what
+the agent sent, so a test can check exactly what Claude would have seen.
 
-\subsection{Benchmarks: \f{benchmarks/run.py}}
-\filehead{run.py}{148}
-For each scenario: repair the robot, inject the fault, run the agent, grade the root cause
-twice (keywords, and a Claude judge answering in a strict JSON format with low effort), repair
-the fault. Prints correct diagnoses, mean time and total cost; saves the results in
-\f{benchmarks/results/}.
+\subsection*{The 24 tests}
+\f{test\_agent.py} (5): a check produces a report; every movement needs approval; an
+out-of-range test never moves; loop mode wakes on a fault and asks; declining stops it.
+\f{test\_core.py} (10): safety, schema, watcher, ring buffer, recorder stop, save/load, cuts,
+settings. \f{test\_ursim.py} (9): packets, log formats, pendant, black box, documentation search.
 
-\subsection{Tests: \f{tests/}}
-24 tests, run with \f{.venv/bin/python -m pytest}, using the fake arm and a scripted fake
-Claude (no network, no cost):
-\begin{itemize}
-\item \f{test\_agent.py} (5): a full check produces a report; every movement needs approval; an
-out-of-range test is refused without moving; loop mode wakes on a fault and asks; loop mode
-stops if the operator declines.
-\item \f{test\_core.py} (10): safety bounds and PIN, tool schema, watcher (``default'' is not a
-``fault''), ring buffer, recorder stop, save/load, a stream that stops for good, settings.
-\item \f{test\_ursim.py} (9): Real-Time and Primary packets, the three log formats, colours,
-multi-line messages, pendant lines, documentation search, black box reading, Markdown sections.
-\end{itemize}
-
-% ---------------------------------------------------------------------------------------------
+% =============================================================================================
 \section{How it was developed}
 
 \subsection{The code principles (CONTRIBUTING.md)}
 \begin{enumerate}
-\item \textbf{Type annotations everywhere}: every parameter and return value says its type.
-\item \textbf{Docstrings everywhere}: every module, class and function starts with a sentence
-saying what it does (your choice). This is why about a quarter of the lines are explanations.
-\item \textbf{Deep modules} (J.\ Ousterhout, \emph{A Philosophy of Software Design}): a simple
-interface hiding a rich implementation; no tiny functions called once; each file hides one
-decision (e.g.\ only \f{ursim.py} knows the UR byte formats).
-\item \textbf{Logging}: every module logs; levels have a meaning; secrets are never logged.
-\item \textbf{Comments only for the why}, never to paraphrase the code.
+\item \textbf{Type annotations everywhere}.
+\item \textbf{Docstrings everywhere} (your choice): about a quarter of the lines are explanations.
+\item \textbf{Deep modules} (J.\ Ousterhout): a simple interface hiding a rich implementation; no
+tiny functions called once; each file hides one decision.
+\item \textbf{Logging}: every module logs; secrets are never logged.
+\item \textbf{Comments only for the why}.
 \item \textbf{English everywhere}; \f{ruff} and \f{pytest} pass before every commit.
 \end{enumerate}
 
 \subsection{The history of this branch}
-\begin{center}\small
+\begin{center}\footnotesize
 \begin{tabularx}{\linewidth}{@{}>{\ttfamily}l X@{}}
 \toprule
-3f6230e & Refactor: software detection only, English, no baselines, no RoArm or physical code, redundancy removed. \\
+3f6230e & Refactor: software detection only, English, no baselines, redundancy removed. \\
 149501b & URSim study: evidence capture, pendant log, black boxes, stream-cut fixes. \\
 22d0ba1 & Official UR error code pages as documentation. \\
-55d2ac9 & Four new faults: PolyScope freeze, network cut, CPU starvation, CPU overload. \\
-d375ff4 & Network and disk faults; URSim moved to its own small disk. \\
+55d2ac9 & Four new faults. \\
+d375ff4 & Network and disk faults; URSim on its own disk. \\
 e27d060 & Capture probe for disk full, \f{--repeat}. \\
-934bbc3 & Catalogue generator (observed columns computed only). \\
+934bbc3 & Catalogue generator. \\
 f48d821 & \f{Recorder.stop()}: fixes the polluted captures. \\
-f6c35d2 & The fault catalogue (13 faults \(\times\) 5 runs) and the detection ideas. \\
+f6c35d2 & The fault catalogue (13 \(\times\) 5 runs) and detection ideas. \\
+cfd87a4 & The first version of this guide. \\
 \bottomrule
 \end{tabularx}
 \end{center}
 
-\subsection{Bugs found by testing on the real simulator}
-Each of these was invisible in the unit tests and only appeared on URSim. They are the reason
-the study was worth doing before writing detection rules.
+\subsection{Bugs found only by testing on the real simulator}
 \begin{itemize}
-\item \f{tail} kept running inside the container after we stopped (fixed in \f{logs()}).
-\item A stream that stopped for good was not counted as a cut (fixed in \f{stream\_gaps}).
-\item Recorders were never stopped, and their leftover connections added cuts and warnings to
-unrelated faults from round 4 on. Fixed, tested, and all 65 captures redone.
-\item Log files contain NULs and get rewritten: reading by line number failed; now by byte
-position and time.
-\item Killing PolyScope stops the whole container (no supervisor), so that fault became a
-freeze instead.
+\item \f{tail} kept running inside the container after we stopped.
+\item A stream that stopped for good was not counted as a cut.
+\item Recorders were never stopped and polluted the captures (all 65 redone).
+\item Log files contain NUL characters and get rewritten: reading by line number failed.
+\item Killing PolyScope stops the whole container, so that fault became a freeze.
 \item \f{docker update --cpus 0} does not remove a CPU limit.
-\item The mean sample rate looked normal for a stream that had stopped; the catalogue uses the
-effective rate (samples received \(\div\) window length).
+\item The mean sample rate looked normal for a stream that had stopped.
 \end{itemize}
 
-% ---------------------------------------------------------------------------------------------
+% =============================================================================================
 \section{How big is it?}
 
-\subsection{Lines, by part}
 \begin{center}\small
 \begin{tabular}{@{}lrrrrr@{}}
 \toprule
@@ -627,102 +1240,87 @@ Tests & 389 & 256 & 47 & 0 & 86 \\
 \bottomrule
 \end{tabular}
 \end{center}
-Plus about 820 lines of Markdown, YAML and LaTeX (README, summary, scenarios, catalogue sources
-and template, system prompt).
+Plus about 820 lines of Markdown, YAML and LaTeX.
 
-\textbf{The short answer:} the project is \textbf{about 4\,000 lines of Python}, of which
-\textbf{about 2\,400 are real code}. The agent itself is \textbf{2\,668 lines in 19 files, 1\,532
-of real code}. The rest is explanations (docstrings, your choice), blank lines, and the tools
-that build the fault dataset.
+\textbf{In short:} about \textbf{4\,000 lines of Python}, of which \textbf{about 2\,400 are real
+code}. The agent itself is \textbf{2\,668 lines in 19 files} (1\,532 of real code), defining
+\textbf{27 classes} (plus 2 test doubles and \f{URSimFaults} outside it). On \f{main} it was
+2\,917 lines in 33 files.
 
-\subsection{The agent package, file by file}
-\begin{center}\small
-\begin{tabular}{@{}lrr@{}}
+\begin{center}\footnotesize
+\begin{tabular}{@{}lrrl@{}}
 \toprule
-\textbf{File} & \textbf{Total} & \textbf{Code} \\
+\textbf{File} & \textbf{Total} & \textbf{Code} & \textbf{Classes} \\
 \midrule
-connectors/ursim.py & 672 & 426 \\
-core/recorder.py & 305 & 190 \\
-agent/graph.py & 251 & 145 \\
-agent/tools.py & 239 & 164 \\
-docs.py & 150 & 91 \\
-\_\_main\_\_.py & 141 & 84 \\
-agent/llm.py & 141 & 75 \\
-connectors/fake.py & 136 & 72 \\
-core/events.py & 123 & 49 \\
-agent/context.py & 113 & 48 \\
-core/checks.py & 87 & 36 \\
-config.py & 82 & 48 \\
-hmi.py & 77 & 41 \\
-core/safety.py & 76 & 38 \\
-core/interfaces.py & 69 & 24 \\
-5 \f{\_\_init\_\_.py} files & 7 & 1 \\
+connectors/ursim.py & 672 & 426 & Dashboard, URSimConnector \\
+core/recorder.py & 305 & 190 & Recording, Recorder \\
+agent/graph.py & 251 & 145 & State \\
+agent/tools.py & 239 & 164 & Toolbox \\
+docs.py & 150 & 91 & Passage, DocSearch \\
+\_\_main\_\_.py & 141 & 84 & Runtime \\
+agent/llm.py & 141 & 75 & LLM, Usage, ClaudeClient \\
+connectors/fake.py & 136 & 72 & FakeConnector \\
+core/events.py & 123 & 49 & 8 classes \\
+agent/context.py & 113 & 48 & (functions) \\
+core/checks.py & 87 & 36 & EventWatcher \\
+config.py & 82 & 48 & Settings \\
+hmi.py & 77 & 41 & CLI \\
+core/safety.py & 76 & 38 & SafetyRefusal, SafetyPolicy \\
+core/interfaces.py & 69 & 24 & Connector \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\subsection{Compared with \f{main}}
-On \f{main}, the agent package was 2\,917 lines in 33 files. It is now 2\,668 lines in 19 files,
-\emph{while gaining} the pendant log, the black boxes, the official documentation and many
-fixes. The parts that grew are the fault tools (210 \(\to\) 759 lines: 13 faults instead of 5,
-plus capture and catalogue) and the tests (273 \(\to\) 389).
-
-% ---------------------------------------------------------------------------------------------
+% =============================================================================================
 \section{What is missing}
 
-In order of importance for the project.
-
 \subsection{1. The detection rules on the signals}
-\f{core/checks.py} only watches logs and fault codes. Rules b (target vs reality), e (joint
-effort ratio), a (hardware limits) and c (recent past) are decided but \textbf{not written}, and
-\f{config/detection.yaml} does not exist yet. Consequence, measured in the catalogue: in loop
-mode, \textbf{4 of the 13 faults raise no alert at all} (wrong payload, controller frozen,
-CPU starvation, CPU overload).
+\f{EventWatcher} only reads logs and fault codes. Rules b (target vs reality), e (joint effort
+ratio), a (hardware limits) and c (recent past) are decided but \textbf{not written}, and
+\f{config/detection.yaml} does not exist. In loop mode, \textbf{4 of the 13 faults raise no alert}
+(wrong payload, controller frozen, CPU starvation, CPU overload).
 
 \subsection{2. The expected current in the live stream}
-Rules b and e need the current the controller \emph{expects}. Today only the black boxes have it
-(\f{current\_target}); the live Real-Time stream reads the target torque but not the target
-current. Its position in the packet must be checked on URSim first.
+Rules b and e need the current the controller \emph{expects}. Only black boxes have it
+(\f{current\_target}); \f{REALTIME\_FIELDS} reads the target torque but not the target current.
+Its position in the packet must be checked on URSim first.
 
 \subsection{3. A ``stream health'' rule (proposed rule g)}
-An alert when fewer samples arrive than expected, or none. It would catch 8 of the 13 faults
-alone, including 3 that the logs miss. Waiting for your decision.
+An alert when fewer samples arrive than expected, or none. It would catch 8 of the 13 faults,
+3 of them missed by the logs. Waiting for your decision.
 
-\subsection{4. Benchmarks: never run, and incomplete}
+\subsection{4. Benchmarks: never run, incomplete}
 \begin{itemize}
 \item \textbf{The agent has not yet done a full investigation with the real Claude on this
-branch}: \f{data/reports/} and \f{benchmarks/results/} are empty. Everything in the agent is
-tested with a fake Claude only.
-\item \f{scenarios.yaml} covers only 5 of the 13 faults.
-\item So the statistics (\% detected, \% correct cause, detection time, cost) do not exist yet.
+branch} (no report, no benchmark result, no \f{llm\_calls.jsonl}). It is tested with
+\f{ScriptedLLM} only.
+\item \f{scenarios.yaml} covers 5 of the 13 faults, so the statistics do not exist yet.
 \end{itemize}
 
-\subsection{5. Smaller gaps in the code}
+\subsection{5. Smaller gaps, some found while writing this guide}
 \begin{itemize}
-\item The summary Claude gets after a test gives the \emph{mean} rate between the first and last
-sample, which can look normal when the stream stopped (the catalogue already uses the
-effective rate; the agent should too). The cuts are reported, so it is not hidden, only
-misleading.
-\item \f{Recorder.subscribe()} has no ``unsubscribe'': each loop scenario of a benchmark adds a
-queue that keeps filling. Harmless for one run, a slow memory leak over many.
-\item The documentation is only the error code pages: no User or Service Manual yet, so Claude
-cannot quote a repair procedure or a hardware limit (which rule a needs).
-\item No tests for the fault tools, the benchmark runner, the cost computation or the
-plot/table budget; no automatic end-to-end test against URSim; no continuous integration.
+\item \textbf{Misleading rate.} \f{Recording.rate\_hz} counts samples between the first and last
+one. In the network cut capture it says \textbf{481.3\,Hz} although the stream stopped after
+0.012\,s for 15.2\,s. Claude gets the cut list too, so nothing is hidden, but the rate in the
+summary should be the effective one (samples \(\div\) window length), as in the catalogue.
+\item \textbf{Continuation lines inherit ERROR.} In the network cut capture, a long PolyScope
+line about a licence certificate was split in two; the second half has no date, so
+\f{parse\_log\_line} gave it the level of the line above (ERROR). Here no alert resulted (same
+reason, repeat filter), but a harmless line could trigger one.
+\item \textbf{No ``unsubscribe''.} Each \f{Recorder.subscribe()} queue fills forever; the
+benchmarks create one per scenario. A slow memory leak over long series.
+\item \textbf{Documentation}: only the error code pages; no User or Service Manual, so no repair
+procedures or hardware limits (needed by rule a).
+\item \textbf{Tests}: none for the fault tools, the benchmark runner, \f{cost\_usd}, the
+plot/table budget; no automatic test against URSim; no continuous integration.
 \item An old \f{data/baselines/} folder from before the refactor is still on disk (not in git).
 \end{itemize}
 
-\subsection{6. Planned for later (summary.md, section 6)}
-\begin{itemize}
-\item The RoArm-M2-S connector, with log lines and error codes we generate ourselves.
-\item Physical anomaly detection: ESP32 \(\to\) USB \(\to\) Raspberry Pi, FFT and rules on the Pi,
-Claude explains.
-\item Running everything on the Raspberry Pi.
-\item An interface other than the terminal (web, notifications), and reports in a readable
-format (today: JSON + terminal).
-\end{itemize}
+\subsection{6. Planned for later}
+The RoArm-M2-S connector (with our own log lines and codes), physical anomaly detection (ESP32
+\(\to\) USB \(\to\) Raspberry Pi), running on the Pi, and an interface beyond the terminal.
 
-% ---------------------------------------------------------------------------------------------
+% =============================================================================================
 \section{Glossary}
 \small
 \begin{description}[style=nextline,leftmargin=0pt,itemsep=3pt]
@@ -732,14 +1330,17 @@ format (today: JSON + terminal).
 \item[Teach pendant] The tablet used to program and drive the robot. Its event list is \f{log\_history.txt}.
 \item[URScript] The robot's programming language (\f{movej}, \f{set\_target\_payload}\ldots).
 \item[Protective stop] The robot stops because a safety limit was crossed; code \f{C209} when triggered by a program.
-\item[Robot mode / safety status] e.g.\ RUNNING, POWER\_OFF / NORMAL, PROTECTIVE\_STOP.
-\item[Black box (flight report)] Zip written by the robot on each error: ~30\,s of its own data and logs.
+\item[Robot mode / safety mode] e.g.\ RUNNING (7) / NORMAL (1), PROTECTIVE\_STOP (3).
+\item[Speed scaling] The fraction of the programmed speed the robot actually uses; 0 when nothing runs.
+\item[Black box (flight report)] Zip written by the robot on each error: about 30\,s of its own data and logs.
 \item[Payload] The mass declared for the tool. A wrong value makes the expected torques wrong.
 \item[Following error] The gap between the position the controller asked for and the real one.
+\item[Unix time] Seconds since 1 January 1970; how computers store instants.
+\item[Big-endian double] A decimal number stored in 8 bytes, most significant byte first: the UR binary format.
 \item[Ring buffer] A fixed-size memory where new data overwrites the oldest.
 \item[BM25] The ranking formula of classic search engines.
 \item[Token] The unit Claude reads and is billed by, about 3--4 characters of text.
-\item[Prompt caching] Claude's API keeps the start of a conversation in memory, so resending it costs much less (20 times less for Opus 5.5).
+\item[Prompt caching] The API keeps the start of a conversation, so resending it costs much less (20 times less for Opus 5.5).
 \item[Adaptive thinking / effort] Claude decides how long to think; ``effort'' sets how thorough it is.
 \item[LangGraph] A library to describe a program's flow as a graph of steps.
 \item[netem / iptables] Linux tools to delay or lose network packets / block a port.
