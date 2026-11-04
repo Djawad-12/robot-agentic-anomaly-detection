@@ -1,0 +1,21 @@
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets
+.env
+*.pem
+
+# Everything produced at run time: recordings, stores, evaluation reports
+data/
+
+# Generated documents are never committed
+*.pdf
+*.aux
+*.log
+*.out
+*.fls
+*.fdb_latexmk
